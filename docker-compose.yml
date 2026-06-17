@@ -102,17 +102,7 @@ services:
         condition: service_started
 
   # Web app
-  app:
-    build:
-      context: ./app
-      dockerfile: Dockerfile
-    environment:
-      NEXT_PUBLIC_SOROBAN_RPC: "http://localhost:8000/soroban/rpc"
-      NEXT_PUBLIC_COORDINATOR_URL: "http://localhost:8080"
-    ports:
-      - "3000:3000"
-    depends_on:
-      - coordinator
+  # app is deployed on Vercel — run locally with: cd app && npm run dev
 
 volumes:
   crs-data:
