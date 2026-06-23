@@ -193,6 +193,12 @@ body {
   50% { opacity: 1; }
 }
 
+/* Seat pulse glow when it's the user's turn (#47) */
+@keyframes seatPulse {
+  0%, 100% { box-shadow: 0 0 0 3px #f1c40f, 0 0 18px 6px rgba(241,196,15,0.45); }
+  50% { box-shadow: 0 0 0 5px #f1c40f, 0 0 28px 10px rgba(241,196,15,0.65); }
+}
+
 /* Game Boy modal slide in */
 @keyframes gameboySlideIn {
   0% { transform: translateY(30px) scale(0.95); opacity: 0; }

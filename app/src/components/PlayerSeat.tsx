@@ -50,6 +50,17 @@ export function PlayerSeat({
       className="relative flex flex-col items-center gap-1"
       style={{
         opacity: player.folded ? 0.5 : 1,
+        // Pulse glow on user's own seat when it's their turn (#47).
+        boxShadow:
+          isCurrentTurn && isUser && !player.folded
+            ? "0 0 0 3px #f1c40f, 0 0 18px 6px rgba(241,196,15,0.45)"
+            : undefined,
+        borderRadius: isCurrentTurn && isUser ? 6 : undefined,
+        animation:
+          isCurrentTurn && isUser && !player.folded
+            ? "seatPulse 1.2s ease-in-out infinite"
+            : undefined,
+        transition: "box-shadow 0.3s",
       }}
     >
       {activeEmote && (

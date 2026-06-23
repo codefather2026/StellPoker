@@ -29,6 +29,10 @@ import {
   type HandHistoryEntry,
   type Street,
 } from "@/lib/hand-history";
+import {
+  useTurnNotification,
+  requestPermissionOnJoin,
+} from "@/lib/use-notifications";
 
 type ActiveRequest = "deal" | "flop" | "turn" | "river" | "showdown" | null;
 type PlayMode = "single" | "headsup" | "multi";
@@ -131,6 +135,10 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
     ? userAddress
     : onChainTurnAddress;
   const isMyTurn = !!userAddress && displayedTurnAddress === userAddress;
+
+  // Issue #47: browser notification + sound when it becomes the user's turn.
+  useTurnNotification({ isMyTurn, tableName: `Table #${tableId}` });
+
   const isWalletSeated = !!wallet && !!userPlayer;
   const seatedAddresses = game.players
     .filter((p) => isStellarAddress(p.address))
@@ -319,8 +327,9 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
     inferredModeRef.current = true;
   }, [initialPlayMode, lobby]);
 
-  // Silent reconnect on mount
+  // Silent reconnect on mount + request notification permission (#47).
   useEffect(() => {
+    void requestPermissionOnJoin();
     if (!wallet) {
       void trySilentReconnect().then((session) => {
         if (session) {

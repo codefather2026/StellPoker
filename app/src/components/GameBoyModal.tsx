@@ -4,8 +4,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { getMasterVolume, setMasterVolume } from "./PixelWorld";
 import { clearSavedWallet } from "@/lib/freighter";
+import { ProofExplorer } from "./ProofExplorer";
 
-type Tab = "settings" | "flappy";
+type Tab = "settings" | "flappy" | "proofs";
 
 /* ─────────────────────────────────────────────
    FLAPPY BIRD ENGINE
@@ -413,7 +414,7 @@ export function GameBoyModal({ open, onClose, onLogout }: GameBoyModalProps) {
             gap: "2px",
             marginBottom: "2px",
           }}>
-            {(["settings", "flappy"] as Tab[]).map((t) => (
+            {(["settings", "proofs", "flappy"] as Tab[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -429,7 +430,7 @@ export function GameBoyModal({ open, onClose, onLogout }: GameBoyModalProps) {
                   letterSpacing: "0.5px",
                 }}
               >
-                {t === "settings" ? "SETTINGS" : "FLAPPY BIRD"}
+                {t === "settings" ? "SETTINGS" : t === "proofs" ? "ZK PROOFS" : "FLAPPY BIRD"}
               </button>
             ))}
           </div>
@@ -444,7 +445,17 @@ export function GameBoyModal({ open, onClose, onLogout }: GameBoyModalProps) {
             imageRendering: "pixelated",
             boxShadow: "inset 1px 1px 3px rgba(0,0,0,0.3)",
           }}>
-            {tab === "settings" ? (
+            {tab === "proofs" ? (
+              /* ── ZK PROOF EXPLORER SCREEN ── */
+              <div style={{
+                padding: "10px 12px",
+                height: "100%",
+                overflowY: "auto",
+                background: "#b8c4a0",
+              }}>
+                <ProofExplorer />
+              </div>
+            ) : tab === "settings" ? (
               /* ── SETTINGS SCREEN ── */
               <div style={{
                 padding: "10px 12px",

@@ -15,7 +15,7 @@ use axum::{
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::{mpc, soroban, AppState, TableSession};
+use crate::{mpc, session_gc, soroban, AppState, TableSession};
 use auth::{allow_insecure_dev_auth, enforce_rate_limit, validate_signed_request};
 use parsing::{
     parse_deal_outputs, parse_requested_buy_in, parse_reveal_outputs, parse_showdown_outputs,
@@ -946,4 +946,48 @@ pub async fn committee_status(State(state): State<AppState>) -> Json<CommitteeSt
         healthy,
         status: "active".to_string(),
     })
+}
+
+/// POST /api/session/:session_id/cancel
+///
+/// Admin endpoint for manual MPC session cancellation.
+/// Kills associated processes, removes temp files, and marks the session freed.
+pub async fn cancel_mpc_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> StatusCode {
+    let cancelled = session_gc::cancel_session(
+        &state.mpc_sessions,
+        &session_id,
+        "manual admin cancel",
+        false,
+    )
+    .await;
+
+    if cancelled {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+/// GET /api/session/:session_id/status
+///
+/// Returns the current status of an MPC session so clients can detect timeouts.
+pub async fn get_mpc_session_status(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let sessions = state.mpc_sessions.read().await;
+    let Some(session) = sessions.get(&session_id) else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    Ok(Json(serde_json::json!({
+        "session_id": session.session_id,
+        "table_id": session.table_id,
+        "status": session.status.to_string(),
+        "cancel_reason": session.cancel_reason,
+        "elapsed_secs": session.started_at.elapsed().as_secs(),
+    })))
 }

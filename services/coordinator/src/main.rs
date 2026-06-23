@@ -14,6 +14,7 @@
 //!   Barretenberg/UltraHonk proofs
 
 use axum::{
+    middleware,
     routing::{get, post},
     Router,
     extract::State,
@@ -34,7 +35,9 @@ use tower_http::cors::CorsLayer;
 use serde::Serialize;
 
 mod api;
+mod middleware as request_log;
 mod mpc;
+mod session_gc;
 mod soroban;
 
 #[derive(Serialize, Clone, Debug)]
@@ -90,6 +93,7 @@ struct AppState {
     rate_limit_state: Arc<RwLock<RateLimitState>>,
     metrics: MetricsState,
     chat_channels: Arc<Mutex<HashMap<u32, tokio::sync::broadcast::Sender<String>>>>,
+    mpc_sessions: session_gc::SessionStore,
 }
 
 #[derive(Clone)]
@@ -155,7 +159,13 @@ struct RateLimitState {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    // Structured logging: REQUEST_LOG_FORMAT=json uses JSON output; default is human-readable.
+    let log_format = std::env::var("REQUEST_LOG_FORMAT").unwrap_or_default();
+    if log_format.eq_ignore_ascii_case("json") {
+        tracing_subscriber::fmt().json().init();
+    } else {
+        tracing_subscriber::fmt().init();
+    }
 
     let mpc_config = MpcConfig {
         node_endpoints: vec![
@@ -196,6 +206,11 @@ async fn main() {
         node_healths: Arc::new(Mutex::new(initial_node_healths)),
     };
 
+    let mpc_sessions: session_gc::SessionStore =
+        Arc::new(RwLock::new(std::collections::HashMap::new()));
+
+    session_gc::spawn_gc_task(Arc::clone(&mpc_sessions));
+
     let state = AppState {
         tables: Arc::new(RwLock::new(HashMap::new())),
         lobby_assignments: Arc::new(RwLock::new(HashMap::new())),
@@ -205,6 +220,7 @@ async fn main() {
         rate_limit_state: Arc::new(RwLock::new(RateLimitState::default())),
         metrics: metrics.clone(),
         chat_channels: Arc::new(Mutex::new(HashMap::new())),
+        mpc_sessions,
     };
 
     // Spawn background node health check task
@@ -264,7 +280,10 @@ async fn main() {
         .route("/api/table/:table_id/state", get(api::get_table_state))
         .route("/api/committee/status", get(api::committee_status))
         .route("/api/table/:table_id/chat/ws", get(chat_ws_handler))
+        .route("/api/session/:session_id/cancel", post(api::cancel_mpc_session))
+        .route("/api/session/:session_id/status", get(api::get_mpc_session_status))
         .layer(axum::middleware::from_fn_with_state(state.clone(), metrics_middleware))
+        .layer(middleware::from_fn(request_log::log_request))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
