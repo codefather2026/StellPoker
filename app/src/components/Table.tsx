@@ -105,6 +105,13 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
   const [, bumpAliasTick] = useState(0);
   const [betAmount, setBetAmount] = useState(0);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState<Array<{ alias: string; text: string; senderColor: string }>>([]);
+  const [newMessagesCount, setNewMessagesCount] = useState(0);
+  const [seatEmotes, setSeatEmotes] = useState<Record<number, string>>({});
+  const wsRef = useRef<WebSocket | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const autoStreetRef = useRef<string>("");
   const inferredModeRef = useRef(false);
   const streetLogRef = useRef<{ handNumber: number; streets: { street: Street; pot: number; boardCards: number[] }[] }>({
@@ -543,6 +550,120 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
     handleAction,
   ]);
 
+  const EMOTES = ["😃", "😢", "😠", "😎", "🤔", "🎉"];
+
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [chatMessages, chatOpen]);
+
+  useEffect(() => {
+    let active = true;
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: NodeJS.Timeout;
+
+    const connect = () => {
+      if (!active) return;
+      const base = api.COORDINATOR_API_BASE;
+      const wsBase = base.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+      const wsUrl = `${wsBase}/api/table/${tableId}/chat/ws`;
+
+      ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data) as {
+            seat_index: number;
+            alias: string;
+            text?: string;
+            emote?: string;
+          };
+
+          if (data.text) {
+            const colors = ["#ff6b6b", "#4dabf7", "#51cf66", "#fcc419", "#cc5de8", "#20c997"];
+            const senderColor = colors[data.seat_index % colors.length];
+            setChatMessages((prev) => [
+              ...prev,
+              { alias: data.alias, text: data.text || "", senderColor },
+            ]);
+            if (!chatOpen) {
+              setNewMessagesCount((c) => c + 1);
+            }
+          }
+
+          if (data.emote) {
+            setSeatEmotes((prev) => ({ ...prev, [data.seat_index]: data.emote || "" }));
+            setTimeout(() => {
+              setSeatEmotes((prev) => {
+                const copy = { ...prev };
+                delete copy[data.seat_index];
+                return copy;
+              });
+            }, 3000);
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      };
+
+      ws.onclose = () => {
+        if (active) {
+          reconnectTimeout = setTimeout(connect, 3000);
+        }
+      };
+
+      ws.onerror = () => {
+        ws?.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      active = false;
+      clearTimeout(reconnectTimeout);
+      ws?.close();
+    };
+  }, [tableId, chatOpen]);
+
+  const sendChatMessage = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatInput.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const mySeat = userPlayer ? userPlayer.seat : 0;
+    const myAlias = userAddress ? (getAlias(userAddress) || `Seat ${mySeat}`) : `Seat ${mySeat}`;
+
+    const payload = {
+      seat_index: mySeat,
+      alias: myAlias,
+      text: chatInput.trim(),
+    };
+
+    wsRef.current.send(JSON.stringify(payload));
+    setChatInput("");
+  };
+
+  const sendEmote = (emote: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const mySeat = userPlayer ? userPlayer.seat : 0;
+    const myAlias = userAddress ? (getAlias(userAddress) || `Seat ${mySeat}`) : `Seat ${mySeat}`;
+
+    const payload = {
+      seat_index: mySeat,
+      alias: myAlias,
+      emote,
+    };
+
+    wsRef.current.send(JSON.stringify(payload));
+  };
+
   return (
     <PixelWorld>
       <div className="min-h-screen flex flex-col items-center gap-4 p-4 pt-6 relative z-[10]">
@@ -747,6 +868,7 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
                     isBot={playMode === "single"}
                     alias={getAlias(player.address) ?? undefined}
                     hideChipStats={false}
+                    activeEmote={seatEmotes[player.seat]}
                   />
                 ))}
 
@@ -831,6 +953,7 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
                     }
                   }}
                   hideChipStats={false}
+                  activeEmote={seatEmotes[userPlayer.seat]}
                 />
               ) : (
                 <div className="flex flex-col items-center gap-2" style={{ opacity: 0.25 }}>
@@ -947,6 +1070,90 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Chat Overlay Toggle Button */}
+      <button
+        onClick={() => {
+          setChatOpen((prev) => !prev);
+          setNewMessagesCount(0);
+        }}
+        className="pixel-btn pixel-btn-blue text-[9px] fixed bottom-4 right-4 z-40"
+        style={{ padding: "8px 12px" }}
+      >
+        CHAT {newMessagesCount > 0 ? `(${newMessagesCount})` : ""}
+      </button>
+
+      {/* Floating Chat Drawer */}
+      {chatOpen && (
+        <div
+          className="pixel-border-thin fixed bottom-16 right-4 z-40 flex flex-col w-72 h-64 p-3 gap-2"
+          style={{
+            background: "rgba(20, 12, 8, 0.95)",
+            borderColor: "var(--ui-border)",
+          }}
+        >
+          <div className="flex justify-between items-center border-b border-gray-800 pb-1" style={{ fontFamily: "'Press Start 2P', monospace" }}>
+            <span className="text-[9px] text-[#f1c40f]">TABLE CHAT</span>
+            <button
+              onClick={() => setChatOpen(false)}
+              className="text-[9px] text-[#95a5a6]"
+              style={{ background: "none", border: "none", cursor: "pointer" }}
+            >
+              [X]
+            </button>
+          </div>
+          
+          {/* Messages list */}
+          <div
+            ref={chatScrollRef}
+            className="flex-1 overflow-y-auto flex flex-col gap-2 text-[8px] text-left p-1"
+            style={{ scrollbarWidth: "thin", fontFamily: "'Press Start 2P', monospace", maxHeight: "140px" }}
+          >
+            {chatMessages.length === 0 ? (
+              <div className="text-gray-600 text-center mt-8 italic" style={{ fontSize: "8px" }}>No messages yet.</div>
+            ) : (
+              chatMessages.map((msg, idx) => (
+                <div key={idx} className="leading-relaxed">
+                  <span style={{ color: msg.senderColor }}>{msg.alias}: </span>
+                  <span className="text-white">{msg.text}</span>
+                </div>
+              ))
+            )}
+          </div>
+          
+          {/* 6 Quick Emotes */}
+          <div className="flex justify-between items-center gap-1 mt-1 border-t border-gray-900 pt-2">
+            {EMOTES.map((emote, idx) => (
+              <button
+                key={idx}
+                onClick={() => sendEmote(emote)}
+                className="hover:scale-110 transition-transform p-1 text-[14px]"
+                style={{ background: "none", border: "none", cursor: "pointer" }}
+              >
+                {emote}
+              </button>
+            ))}
+          </div>
+          
+          {/* Input row */}
+          <form onSubmit={sendChatMessage} className="flex gap-1 mt-1">
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              placeholder="Say something..."
+              className="flex-1 px-2 py-1 text-[8px]"
+            />
+            <button
+              type="submit"
+              className="pixel-btn pixel-btn-green text-[8px]"
+              style={{ padding: "4px 8px" }}
+            >
+              SEND
+            </button>
+          </form>
         </div>
       )}
     </PixelWorld>

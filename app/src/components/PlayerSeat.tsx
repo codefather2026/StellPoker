@@ -19,6 +19,7 @@ interface PlayerSeatProps {
   /** Renders a small edit affordance next to the label (own seat only). */
   onEditAlias?: () => void;
   hideChipStats?: boolean;
+  activeEmote?: string | null;
 }
 
 export function PlayerSeat({
@@ -32,6 +33,7 @@ export function PlayerSeat({
   alias,
   onEditAlias,
   hideChipStats = false,
+  activeEmote = null,
 }: PlayerSeatProps) {
   const sprite = isUser ? 18 : opponentSprite(player.seat);
   const cardSize = isUser ? "md" : "sm";
@@ -50,6 +52,24 @@ export function PlayerSeat({
         opacity: player.folded ? 0.5 : 1,
       }}
     >
+      {activeEmote && (
+        <div
+          className="absolute z-50 bg-[#1a120c] border-2 border-[#8b6914] px-2 py-1 text-[16px] animate-float-up pointer-events-none text-center"
+          style={{
+            top: "-30px",
+            boxShadow: "0 4px 0 rgba(0,0,0,0.3)",
+          }}
+        >
+          {activeEmote}
+          {/* Small Speech Bubble Tail */}
+          <div
+            className="absolute left-1/2 bottom-[-6px] translate-x-[-50%] w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[6px] border-t-[#1a120c]"
+          />
+          <div
+            className="absolute left-1/2 bottom-[-8px] translate-x-[-50%] w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[6px] border-t-[#8b6914] z-[-1]"
+          />
+        </div>
+      )}
       {/* Turn indicator */}
       {isCurrentTurn && !player.folded && (
         <div style={{

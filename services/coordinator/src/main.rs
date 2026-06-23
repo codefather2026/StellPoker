@@ -23,6 +23,8 @@ use axum::{
     http::Request,
     body::Body,
 };
+use axum::extract::ws::{WebSocketUpgrade, WebSocket, Message};
+use futures::{StreamExt, SinkExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -87,6 +89,7 @@ struct AppState {
     auth_state: Arc<RwLock<AuthState>>,
     rate_limit_state: Arc<RwLock<RateLimitState>>,
     metrics: MetricsState,
+    chat_channels: Arc<Mutex<HashMap<u32, tokio::sync::broadcast::Sender<String>>>>,
 }
 
 #[derive(Clone)]
@@ -201,6 +204,7 @@ async fn main() {
         auth_state: Arc::new(RwLock::new(AuthState::default())),
         rate_limit_state: Arc::new(RwLock::new(RateLimitState::default())),
         metrics: metrics.clone(),
+        chat_channels: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Spawn background node health check task
@@ -259,6 +263,7 @@ async fn main() {
         )
         .route("/api/table/:table_id/state", get(api::get_table_state))
         .route("/api/committee/status", get(api::committee_status))
+        .route("/api/table/:table_id/chat/ws", get(chat_ws_handler))
         .layer(axum::middleware::from_fn_with_state(state.clone(), metrics_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -346,7 +351,7 @@ async fn metrics_middleware(
     let method = req.method().to_string();
     let route = format!("{} {}", method, path);
 
-    if path == "/api/health" {
+    if path == "/api/health" || path.ends_with("/chat/ws") {
         return next.run(req).await;
     }
 
@@ -376,4 +381,86 @@ async fn metrics_middleware(
     }
 
     response
+}
+
+fn sanitize_chat_message(input: &str) -> String {
+    let trimmed = input.trim();
+    let limited = if trimmed.len() > 128 {
+        &trimmed[..128]
+    } else {
+        trimmed
+    };
+    limited.replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn sanitize_alias(input: &str) -> String {
+    let trimmed = input.trim();
+    let limited = if trimmed.len() > 24 {
+        &trimmed[..24]
+    } else {
+        trimmed
+    };
+    limited.replace('<', "&lt;").replace('>', "&gt;")
+}
+
+async fn chat_ws_handler(
+    ws: WebSocketUpgrade,
+    axum::extract::Path(table_id): axum::extract::Path<u32>,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_chat_socket(socket, table_id, state))
+}
+
+async fn handle_chat_socket(socket: WebSocket, table_id: u32, state: AppState) {
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    
+    let tx = {
+        let mut channels = state.chat_channels.lock().await;
+        channels.entry(table_id)
+            .or_insert_with(|| {
+                let (tx, _) = tokio::sync::broadcast::channel(100);
+                tx
+            })
+            .clone()
+    };
+    
+    let mut rx = tx.subscribe();
+    
+    let mut send_task = tokio::spawn(async move {
+        while let Ok(msg_str) = rx.recv().await {
+            if ws_sender.send(Message::Text(msg_str.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+    
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_receiver.next().await {
+            if let Ok(text) = msg.to_text() {
+                if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(text) {
+                    if let Some(text_val) = json_val.get_mut("text") {
+                        if let Some(s) = text_val.as_str() {
+                            let sanitized = sanitize_chat_message(s);
+                            *text_val = serde_json::Value::String(sanitized);
+                        }
+                    }
+                    if let Some(alias_val) = json_val.get_mut("alias") {
+                        if let Some(s) = alias_val.as_str() {
+                            let sanitized = sanitize_alias(s);
+                            *alias_val = serde_json::Value::String(sanitized);
+                        }
+                    }
+                    
+                    if let Ok(broadcast_msg) = serde_json::to_string(&json_val) {
+                        let _ = tx.send(broadcast_msg);
+                    }
+                }
+            }
+        }
+    });
+    
+    tokio::select! {
+        _ = &mut send_task => recv_task.abort(),
+        _ = &mut recv_task => send_task.abort(),
+    }
 }
