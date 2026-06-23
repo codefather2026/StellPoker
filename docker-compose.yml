@@ -32,6 +32,12 @@ services:
       - crs-data:/app/crs
       - circuit-artifacts:/app/circuits
       - ./services/node/config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8101/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
 
   # MPC Node 1
   mpc-node-1:
@@ -52,6 +58,12 @@ services:
       - crs-data:/app/crs
       - circuit-artifacts:/app/circuits
       - ./services/node/config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8102/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
 
   # MPC Node 2
   mpc-node-2:
@@ -72,6 +84,12 @@ services:
       - crs-data:/app/crs
       - circuit-artifacts:/app/circuits
       - ./services/node/config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
 
   # Coordinator (orchestrates MPC + serves API to web app)
   coordinator:
@@ -95,11 +113,17 @@ services:
       soroban:
         condition: service_healthy
       mpc-node-0:
-        condition: service_started
+        condition: service_healthy
       mpc-node-1:
-        condition: service_started
+        condition: service_healthy
       mpc-node-2:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
 
   # Web app
   # app is deployed on Vercel — run locally with: cd app && npm run dev

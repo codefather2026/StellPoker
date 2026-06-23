@@ -76,21 +76,6 @@ ALLOW_INSECURE_DEV_AUTH="${ALLOW_INSECURE_DEV_AUTH:-0}" \
     cargo run -p coordinator --quiet &
 PID_COORD=$!
 
-sleep 1
-
-echo ""
-echo "=== All services started ==="
-echo "  Node 0: http://localhost:8101  (PID: ${PID_NODE0})"
-echo "  Node 1: http://localhost:8102  (PID: ${PID_NODE1})"
-echo "  Node 2: http://localhost:8103  (PID: ${PID_NODE2})"
-echo "  Coordinator: http://localhost:8080  (PID: ${PID_COORD})"
-echo ""
-echo "Test with:"
-echo "  curl -s http://localhost:8080/api/health"
-echo "  curl -s -X POST http://localhost:8080/api/table/1/request-deal"
-echo ""
-echo "Press Ctrl+C to stop all services"
-
 cleanup() {
     echo ""
     echo "Stopping services..."
@@ -98,6 +83,51 @@ cleanup() {
     wait 2>/dev/null
     echo "Done."
 }
-
 trap cleanup EXIT INT TERM
+
+# Poll each service's /health endpoint until it responds (or we time out),
+# so we never tell the user the stack is ready before MPC key generation and
+# the coordinator have actually finished starting up.
+wait_for_health() {
+    local name="$1"
+    local url="$2"
+    local max_attempts=30
+    local attempt=0
+    until curl -sf "$url" >/dev/null 2>&1; do
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "ERROR: $name did not become healthy at $url after ${max_attempts}s" >&2
+            echo "        Check its logs above for the actual failure." >&2
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+echo ""
+echo "Waiting for services to become healthy..."
+wait_for_health "MPC Node 0"  "http://localhost:8101/health"     || exit 1
+echo "  MPC Node 0 ready (http://localhost:8101)"
+wait_for_health "MPC Node 1"  "http://localhost:8102/health"     || exit 1
+echo "  MPC Node 1 ready (http://localhost:8102)"
+wait_for_health "MPC Node 2"  "http://localhost:8103/health"     || exit 1
+echo "  MPC Node 2 ready (http://localhost:8103)"
+wait_for_health "Coordinator" "http://localhost:8080/api/health" || exit 1
+echo "  Coordinator ready (http://localhost:8080)"
+
+echo ""
+echo "=== Stack is ready — open http://localhost:3000 ==="
+echo "  Node 0: http://localhost:8101  (PID: ${PID_NODE0})"
+echo "  Node 1: http://localhost:8102  (PID: ${PID_NODE1})"
+echo "  Node 2: http://localhost:8103  (PID: ${PID_NODE2})"
+echo "  Coordinator: http://localhost:8080  (PID: ${PID_COORD})"
+echo ""
+echo "Run the frontend with: cd app && npm run dev"
+echo ""
+echo "Test with:"
+echo "  curl -s http://localhost:8080/api/health"
+echo "  curl -s -X POST http://localhost:8080/api/table/1/request-deal"
+echo ""
+echo "Press Ctrl+C to stop all services"
+
 wait
