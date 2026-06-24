@@ -145,6 +145,54 @@ python3 scripts/test-flow.py
 NETWORK=testnet ./scripts/deploy.sh
 ```
 
+## Deploy to Mainnet
+
+### Pre-flight checklist
+
+Before deploying to mainnet, complete every item below:
+
+1. **Fund deployer account** — The deployer account needs at least ~100 XLM to cover contract deployment fees and minimum reserve. Export the secret key:
+   ```bash
+   export DEPLOYER_SECRET=S...   # secret key of your funded Stellar account
+   ```
+2. **Download the CRS** — The BN254 Common Reference String must be present on every machine that generates proofs (coordinator and all MPC nodes):
+   ```bash
+   ./scripts/download-crs.sh
+   ```
+3. **Complete the MPC committee key ceremony** — Each of the three node operators must generate their REP3 key share independently. Key shares must never reside on the same machine. Coordinate this out-of-band before registering the committee onchain.
+4. **Compile circuits** — Verification keys embedded in the `zk-verifier` contract must match the compiled circuit artifacts:
+   ```bash
+   ./scripts/compile-circuits.sh
+   ```
+5. **Provision MPC node infrastructure** — All three nodes must be running and reachable at their public endpoints before `register_member` calls are made.
+6. **Back up the deployer key** — Contract admin operations (upgrades, key rotation) require the deployer secret. Store it securely offline.
+
+### Deploy
+
+```bash
+export DEPLOYER_SECRET=S...      # funded mainnet account
+NETWORK=mainnet ./scripts/deploy.sh
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `NETWORK` | `testnet` | `testnet` or `mainnet` |
+| `SOROBAN_RPC` | auto | Soroban RPC URL (auto-selected per network) |
+| `SOROBAN_NETWORK_PASSPHRASE` | auto | Stellar network passphrase (auto-selected per network) |
+| `DEPLOYER_SECRET` | — | **Required for mainnet.** Secret key (`S...`) of the funded deployer account. |
+
+### Mainnet contract addresses
+
+> Mainnet deployment has not been performed yet. This table will be updated once contracts are deployed to the Stellar public network.
+
+| Contract | Address |
+|---|---|
+| Poker Table | — |
+| ZK Verifier | — |
+| Committee Registry | — |
+
 ## Game Flow
 
 1. **Create table** — Admin creates a `PokerTable` contract with config (blinds, buy-in range, timeout).

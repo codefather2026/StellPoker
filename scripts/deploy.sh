@@ -2,16 +2,77 @@
 set -euo pipefail
 
 # Stellar Poker - Deploy Script
-# Deploys contracts to Soroban testnet and starts services
+# Deploys contracts to Soroban testnet or mainnet and starts services
+#
+# Usage:
+#   NETWORK=testnet ./scripts/deploy.sh   # deploy to testnet (default)
+#   NETWORK=mainnet ./scripts/deploy.sh   # deploy to mainnet
+#
+# Environment variables:
+#   NETWORK                    Target network: "testnet" (default) or "mainnet"
+#   SOROBAN_RPC                Soroban RPC URL (auto-set per network if not provided)
+#   SOROBAN_NETWORK_PASSPHRASE Stellar network passphrase (auto-set per network if not provided)
+#   DEPLOYER_SECRET            (mainnet) Secret key of the funded deployer account (S...)
+#                              If unset, a new key is generated (testnet only; not suitable for mainnet)
 
 NETWORK="${NETWORK:-testnet}"
-SOROBAN_RPC="${SOROBAN_RPC:-https://soroban-testnet.stellar.org}"
-SOROBAN_NETWORK_PASSPHRASE="${SOROBAN_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}"
+
+# ── Network defaults ───────────────────────────────────────────────────────────
+if [[ "$NETWORK" == "mainnet" ]]; then
+  SOROBAN_RPC="${SOROBAN_RPC:-https://mainnet.sorobanrpc.com}"
+  SOROBAN_NETWORK_PASSPHRASE="${SOROBAN_NETWORK_PASSPHRASE:-Public Global Stellar Network ; September 2015}"
+else
+  SOROBAN_RPC="${SOROBAN_RPC:-https://soroban-testnet.stellar.org}"
+  SOROBAN_NETWORK_PASSPHRASE="${SOROBAN_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}"
+fi
 
 echo "=== Stellar Poker Deploy ==="
 echo "Network: $NETWORK"
 echo "RPC: $SOROBAN_RPC"
 echo ""
+
+# ── Pre-flight checklist (mainnet only) ───────────────────────────────────────
+if [[ "$NETWORK" == "mainnet" ]]; then
+  echo "=== Mainnet Pre-flight Checklist ==="
+  echo ""
+  echo "Before deploying to mainnet, confirm ALL of the following:"
+  echo ""
+  echo "  [1] Deployer account is funded with enough XLM to cover contract deployment"
+  echo "      fees and reserve (minimum ~100 XLM recommended)."
+  echo "      Set DEPLOYER_SECRET to the S... secret key of that account."
+  echo ""
+  echo "  [2] BN254 Common Reference String (CRS) is downloaded and available."
+  echo "      Run: ./scripts/download-crs.sh"
+  echo "      The same CRS must be present on every MPC node."
+  echo ""
+  echo "  [3] MPC committee key ceremony has been completed."
+  echo "      Each node operator must have generated their REP3 key share."
+  echo "      Key shares must NOT be on the same machine."
+  echo ""
+  echo "  [4] All three MPC nodes are reachable and configured with production"
+  echo "      endpoints before registering the committee onchain."
+  echo ""
+  echo "  [5] Noir circuits have been compiled and verification keys generated."
+  echo "      Run: ./scripts/compile-circuits.sh"
+  echo ""
+  echo "  [6] This is a production deployment — contract upgrades require admin"
+  echo "      key access. Back up the deployer secret key securely."
+  echo ""
+
+  if [[ -z "${DEPLOYER_SECRET:-}" ]]; then
+    echo "ERROR: DEPLOYER_SECRET is required for mainnet deployment."
+    echo "       Export the secret key of your funded deployer account:"
+    echo "       export DEPLOYER_SECRET=S..."
+    exit 1
+  fi
+
+  read -rp "Have you completed all checklist items above? [yes/N] " CONFIRM
+  if [[ "$CONFIRM" != "yes" ]]; then
+    echo "Aborted. Re-run when the checklist is complete."
+    exit 1
+  fi
+  echo ""
+fi
 
 # Check dependencies
 command -v stellar >/dev/null 2>&1 || { echo "stellar CLI not found. Install: cargo install stellar-cli"; exit 1; }
@@ -34,13 +95,19 @@ echo ""
 echo "=== Compiling Noir circuits ==="
 ./scripts/compile-circuits.sh
 
-# --- Step 3: Generate deployer identity ---
+# --- Step 3: Set up deployer identity ---
 echo ""
 echo "=== Setting up deployer identity ==="
-if ! stellar keys show deployer >/dev/null 2>&1; then
-  stellar keys generate deployer --network "$NETWORK"
-  echo "Funding deployer account..."
-  stellar keys fund deployer --network "$NETWORK" || true
+if [[ "$NETWORK" == "mainnet" ]]; then
+  # Mainnet: import the pre-funded key provided via DEPLOYER_SECRET
+  stellar keys add deployer --secret-key "$DEPLOYER_SECRET" 2>/dev/null || true
+else
+  # Testnet: generate and auto-fund a fresh key if one doesn't exist
+  if ! stellar keys show deployer >/dev/null 2>&1; then
+    stellar keys generate deployer --network "$NETWORK"
+    echo "Funding deployer account..."
+    stellar keys fund deployer --network "$NETWORK" || true
+  fi
 fi
 
 DEPLOYER=$(stellar keys address deployer)
