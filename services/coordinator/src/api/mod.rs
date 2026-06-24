@@ -1,6 +1,7 @@
 //! REST API handlers for the coordinator service.
 
 mod auth;
+pub mod admin;
 mod parsing;
 mod session;
 pub mod types;
@@ -958,25 +959,263 @@ pub async fn committee_status(State(state): State<AppState>) -> Json<CommitteeSt
 
 /// POST /api/session/:session_id/cancel
 ///
-/// Admin endpoint for manual MPC session cancellation.
+/// Deprecated admin endpoint for manual MPC session cancellation.
+/// Use POST /api/admin/sessions/:session_id/cancel instead.
 /// Kills associated processes, removes temp files, and marks the session freed.
 pub async fn cancel_mpc_session(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
-) -> StatusCode {
+) -> Result<StatusCode, StatusCode> {
+    let auth = admin::validate_admin_request(
+        &state,
+        &headers,
+        "cancel_session",
+        &state.admin_state,
+    )
+    .await?;
+    admin::require_role(&auth, admin::AdminRole::Operator)?;
+
     let cancelled = session_gc::cancel_session(
         &state.mpc_sessions,
         &session_id,
-        "manual admin cancel",
+        &format!("manual admin cancel by {} ({})", auth.address, auth.role.as_str()),
         false,
     )
     .await;
 
     if cancelled {
-        StatusCode::OK
+        Ok(StatusCode::OK)
     } else {
-        StatusCode::NOT_FOUND
+        Err(StatusCode::NOT_FOUND)
     }
+}
+
+// ─── Admin Endpoints ────────────────────────────────────────────────────────
+
+/// GET /api/admin/health
+///
+/// Detailed health information. Requires read-only or higher.
+pub async fn admin_health(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = admin::validate_admin_request(
+        &state,
+        &headers,
+        "admin_health",
+        &state.admin_state,
+    )
+    .await?;
+    admin::require_role(&auth, admin::AdminRole::ReadOnly)?;
+
+    let uptime_seconds = state.metrics.boot_time.elapsed().as_secs();
+    let mpc_nodes = state.metrics.node_healths.lock().await.clone();
+    let active_mpc_sessions = state.metrics.active_mpc_sessions.load(std::sync::atomic::Ordering::SeqCst);
+    let request_metrics = state.metrics.route_metrics.lock().await.clone();
+
+    let session_count = state.mpc_sessions.read().await.len();
+
+    Ok(Json(serde_json::json!({
+        "service": "coordinator",
+        "uptime_seconds": uptime_seconds,
+        "mpc_nodes": mpc_nodes,
+        "active_mpc_sessions": active_mpc_sessions,
+        "total_session_records": session_count,
+        "request_metrics": request_metrics,
+        "admin": {
+            "address": auth.address,
+            "role": auth.role.as_str(),
+        }
+    })))
+}
+
+/// GET /api/admin/sessions
+///
+/// List all tracked MPC sessions with status and metadata.
+/// Requires operator or higher.
+pub async fn admin_list_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = admin::validate_admin_request(
+        &state,
+        &headers,
+        "admin_list_sessions",
+        &state.admin_state,
+    )
+    .await?;
+    admin::require_role(&auth, admin::AdminRole::Operator)?;
+
+    let sessions = state.mpc_sessions.read().await;
+    let mut list = Vec::new();
+    for (id, session) in sessions.iter() {
+        list.push(serde_json::json!({
+            "session_id": id,
+            "table_id": session.table_id,
+            "status": session.status.to_string(),
+            "cancel_reason": session.cancel_reason,
+            "elapsed_secs": session.started_at.elapsed().as_secs(),
+        }));
+    }
+
+    Ok(Json(serde_json::json!({
+        "count": list.len(),
+        "sessions": list,
+    })))
+}
+
+/// POST /api/admin/sessions/:session_id/cancel
+///
+/// Cancel a specific MPC session by ID. Requires operator or higher.
+pub async fn admin_cancel_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = admin::validate_admin_request(
+        &state,
+        &headers,
+        "admin_cancel_session",
+        &state.admin_state,
+    )
+    .await?;
+    admin::require_role(&auth, admin::AdminRole::Operator)?;
+
+    let reason = format!("admin cancel by {} ({})", auth.address, auth.role.as_str());
+    let cancelled = session_gc::cancel_session(
+        &state.mpc_sessions,
+        &session_id,
+        &reason,
+        false,
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "session_id": session_id,
+        "cancelled": cancelled,
+        "cancelled_by": auth.address,
+        "role": auth.role.as_str(),
+    })))
+}
+
+/// POST /api/admin/sessions/cleanup
+///
+/// Force-cleanup all expired/stale MPC sessions. Requires operator or higher.
+pub async fn admin_cleanup_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = admin::validate_admin_request(
+        &state,
+        &headers,
+        "admin_cleanup_sessions",
+        &state.admin_state,
+    )
+    .await?;
+    admin::require_role(&auth, admin::AdminRole::Operator)?;
+
+    let mut sessions = state.mpc_sessions.write().await;
+    let now = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(3600); // 1 hour default
+    let mut removed = 0u32;
+
+    sessions.retain(|id, s| {
+        if now.duration_since(s.started_at) > timeout {
+            tracing::info!(
+                "Admin cleanup: removing stale session {} (table={}, status={})",
+                id,
+                s.table_id,
+                s.status
+            );
+            removed += 1;
+            false
+        } else {
+            true
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "removed": removed,
+        "remaining": sessions.len(),
+        "action_by": auth.address,
+        "role": auth.role.as_str(),
+    })))
+}
+
+/// GET /api/admin/stats
+///
+/// Detailed admin stats including per-route metrics and system health.
+/// Requires read-only or higher.
+pub async fn admin_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = admin::validate_admin_request(
+        &state,
+        &headers,
+        "admin_stats",
+        &state.admin_state,
+    )
+    .await?;
+    admin::require_role(&auth, admin::AdminRole::ReadOnly)?;
+
+    let uptime = state.metrics.boot_time.elapsed().as_secs();
+    let active_sessions = state.metrics.active_mpc_sessions.load(std::sync::atomic::Ordering::SeqCst);
+    let route_metrics = state.metrics.route_metrics.lock().await.clone();
+    let node_healths = state.metrics.node_healths.lock().await.clone();
+
+    // Aggregate some stats
+    let total_requests: u64 = route_metrics.values().map(|m| m.count).sum();
+    let total_errors: u64 = route_metrics.values().map(|m| m.errors).sum();
+    let healthy_nodes = node_healths.iter().filter(|n| n.connected).count();
+
+    Ok(Json(serde_json::json!({
+        "uptime_seconds": uptime,
+        "active_mpc_sessions": active_sessions,
+        "total_requests": total_requests,
+        "total_errors": total_errors,
+        "healthy_nodes": healthy_nodes,
+        "total_nodes": node_healths.len(),
+        "route_metrics": route_metrics,
+        "admin": {
+            "address": auth.address,
+            "role": auth.role.as_str(),
+        }
+    })))
+}
+
+/// POST /api/admin/config/reload
+///
+/// Reload admin configuration (ADMIN_KEYS) from environment without restart.
+/// Requires super-admin.
+pub async fn admin_reload_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = admin::validate_admin_request(
+        &state,
+        &headers,
+        "admin_reload_config",
+        &state.admin_state,
+    )
+    .await?;
+    admin::require_role(&auth, admin::AdminRole::SuperAdmin)?;
+
+    let new_config = admin::AdminConfig::from_env();
+    tracing::info!(
+        "Admin config reloaded by {} — {} admin key(s) loaded",
+        auth.address,
+        new_config.entries.len()
+    );
+
+    *state.admin_config.write().await = new_config;
+
+    Ok(Json(serde_json::json!({
+        "status": "reloaded",
+        "action_by": auth.address,
+        "role": auth.role.as_str(),
+    })))
 }
 
 /// GET /api/session/:session_id/status

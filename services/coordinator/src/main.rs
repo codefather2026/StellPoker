@@ -42,6 +42,8 @@ mod session_gc;
 mod soroban;
 mod stats;
 
+use api::admin::{AdminConfig, AdminState};
+
 #[derive(Serialize, Clone, Debug)]
 pub struct LatencyHistogram {
     pub under_50ms: u64,
@@ -92,6 +94,8 @@ struct AppState {
     mpc_config: MpcConfig,
     soroban_config: soroban::SorobanConfig,
     auth_state: Arc<RwLock<AuthState>>,
+    admin_config: Arc<RwLock<api::admin::AdminConfig>>,
+    admin_state: api::admin::AdminState,
     rate_limit_state: Arc<RwLock<RateLimitState>>,
     metrics: MetricsState,
     chat_channels: Arc<Mutex<HashMap<u32, tokio::sync::broadcast::Sender<String>>>>,
@@ -216,6 +220,9 @@ async fn main() {
 
     let stats_store = stats::new_store();
 
+    let admin_config = AdminConfig::from_env();
+    let admin_state = AdminState::new();
+
     // Spawn the Horizon event indexer if Soroban is configured.
     if soroban_config.is_configured() && !soroban_config.poker_table_contract.is_empty() {
         let horizon_url = std::env::var("HORIZON_URL")
@@ -240,6 +247,8 @@ async fn main() {
         mpc_config,
         soroban_config,
         auth_state: Arc::new(RwLock::new(AuthState::default())),
+        admin_config: Arc::new(RwLock::new(admin_config)),
+        admin_state,
         rate_limit_state: Arc::new(RwLock::new(RateLimitState::default())),
         metrics: metrics.clone(),
         chat_channels: Arc::new(Mutex::new(HashMap::new())),
@@ -307,6 +316,13 @@ async fn main() {
         .route("/api/table/:table_id/chat/ws", get(chat_ws_handler))
         .route("/api/session/:session_id/cancel", post(api::cancel_mpc_session))
         .route("/api/session/:session_id/status", get(api::get_mpc_session_status))
+        // Admin endpoints (RBAC-protected)
+        .route("/api/admin/health", get(api::admin_health))
+        .route("/api/admin/sessions", get(api::admin_list_sessions))
+        .route("/api/admin/sessions/:session_id/cancel", post(api::admin_cancel_session))
+        .route("/api/admin/sessions/cleanup", post(api::admin_cleanup_sessions))
+        .route("/api/admin/stats", get(api::admin_stats))
+        .route("/api/admin/config/reload", post(api::admin_reload_config))
         .layer(axum::middleware::from_fn_with_state(state.clone(), metrics_middleware))
         .layer(middleware::from_fn(request_log::log_request))
         .layer(CorsLayer::permissive())
