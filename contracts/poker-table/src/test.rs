@@ -977,4 +977,105 @@ mod test {
         let table_id = create_default_table(&s);
         s.client.set_rake_bps(&table_id, &501);
     }
+
+    // ---------------------------------------------------------------------------
+    // 7. Emergency pause mechanism (issue #33)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_pause_and_unpause() {
+        let s = setup();
+        let table_id = create_default_table(&s);
+
+        assert!(!s.client.is_paused(&table_id));
+
+        s.client.pause(&table_id);
+        assert!(s.client.is_paused(&table_id));
+
+        s.client.unpause(&table_id);
+        assert!(!s.client.is_paused(&table_id));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #37)")]
+    fn test_paused_blocks_join_table() {
+        let s = setup();
+        let table_id = create_default_table(&s);
+        s.client.pause(&table_id);
+
+        let player = Address::generate(&s.env);
+        s.token_admin_client.mint(&player, &500);
+        s.client.join_table(&table_id, &player, &500);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #37)")]
+    fn test_paused_blocks_start_hand() {
+        let s = setup();
+        let table_id = create_default_table(&s);
+
+        let p1 = Address::generate(&s.env);
+        let p2 = Address::generate(&s.env);
+        join_player(&s, table_id, &p1, 500);
+        join_player(&s, table_id, &p2, 500);
+
+        s.client.pause(&table_id);
+        s.client.start_hand(&table_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #37)")]
+    fn test_paused_blocks_player_action() {
+        let s = setup();
+        let table_id = create_default_table(&s);
+
+        let p1 = Address::generate(&s.env);
+        let p2 = Address::generate(&s.env);
+        join_player(&s, table_id, &p1, 500);
+        join_player(&s, table_id, &p2, 500);
+        s.client.start_hand(&table_id);
+        commit_mock_deal(&s, table_id, 2);
+
+        s.client.pause(&table_id);
+
+        let table = s.client.get_table(&table_id);
+        let current = table.current_turn;
+        let actor = table.players.get(current).unwrap();
+        s.client
+            .player_action(&table_id, &actor.address, &Action::Fold);
+    }
+
+    #[test]
+    fn test_admin_can_read_while_paused() {
+        let s = setup();
+        let table_id = create_default_table(&s);
+
+        let p1 = Address::generate(&s.env);
+        let p2 = Address::generate(&s.env);
+        join_player(&s, table_id, &p1, 500);
+        join_player(&s, table_id, &p2, 500);
+
+        s.client.pause(&table_id);
+
+        // Admin read functions must not revert while paused
+        let table = s.client.get_table(&table_id);
+        assert_eq!(table.players.len(), 2);
+        let admin = s.client.get_admin(&table_id);
+        assert_eq!(admin, s.admin);
+        assert_eq!(s.client.get_rake_balance(&table_id), 0);
+    }
+
+    #[test]
+    fn test_unpause_allows_operations_again() {
+        let s = setup();
+        let table_id = create_default_table(&s);
+
+        s.client.pause(&table_id);
+        s.client.unpause(&table_id);
+
+        // join_table should succeed after unpause
+        let player = Address::generate(&s.env);
+        let seat = join_player(&s, table_id, &player, 500);
+        assert_eq!(seat, 0);
+    }
 }

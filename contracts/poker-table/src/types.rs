@@ -58,6 +58,7 @@ pub enum PokerTableError {
     HoleCardMismatch = 34,
     WinnerNotEligibleForPot = 35,
     RakeBpsExceedsMax = 36,
+    ContractPaused = 37,
 }
 
 #[contracttype]
@@ -139,4 +140,5 @@ pub struct TableState {
 #[derive(Clone)]
 pub enum DataKey {
     Table(u32),
+    Paused(u32), // per-table pause flag
 }

@@ -68,6 +68,7 @@ pub enum VerifierError {
     PublicInputMismatch = 9,
     WrongCommitmentCount = 10,
     WrongBoardIndicesCount = 11,
+    ContractPaused = 12,
 }
 
 #[contracttype]
@@ -84,6 +85,7 @@ pub enum StorageKey {
     Admin,
     Vk(CircuitType),
     ProofVerified(BytesN<32>),
+    Paused,
 }
 
 #[contractimpl]
@@ -96,6 +98,50 @@ impl ZkVerifierContract {
         admin.require_auth();
         env.storage().instance().set(&StorageKey::Admin, &admin);
         Ok(())
+    }
+
+    /// Pause the verifier (admin only). All proof-verification calls revert while paused.
+    /// NOTE: for production consider a timelock or multi-sig for unpause.
+    pub fn pause(env: Env, admin: Address) -> Result<(), VerifierError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(VerifierError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(VerifierError::NotAdmin);
+        }
+        env.storage().instance().set(&StorageKey::Paused, &true);
+        env.events()
+            .publish((Symbol::new(&env, "verifier_paused"),), admin);
+        Ok(())
+    }
+
+    /// Unpause the verifier (admin only).
+    /// NOTE: for production consider a timelock or multi-sig here.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), VerifierError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(VerifierError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(VerifierError::NotAdmin);
+        }
+        env.storage().instance().set(&StorageKey::Paused, &false);
+        env.events()
+            .publish((Symbol::new(&env, "verifier_unpaused"),), admin);
+        Ok(())
+    }
+
+    /// Returns true if the verifier is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<StorageKey, bool>(&StorageKey::Paused)
+            .unwrap_or(false)
     }
 
     /// Store a verification key for a circuit type.
@@ -140,6 +186,16 @@ impl ZkVerifierContract {
         proof: Bytes,
         public_inputs: Bytes,
     ) -> Result<bool, VerifierError> {
+        // Reject all verification calls while paused
+        if env
+            .storage()
+            .instance()
+            .get::<StorageKey, bool>(&StorageKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(VerifierError::ContractPaused);
+        }
+
         // Check proof size
         if proof.len() as usize != PROOF_BYTES {
             return Err(VerifierError::ProofSizeError);
@@ -376,5 +432,61 @@ impl ZkVerifierContract {
 
         // 4. Run the UltraHonk verification
         Self::verify_proof(env, CircuitType::ShowdownValid, proof, public_inputs)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
+
+    fn setup() -> (Env, ZkVerifierContractClient<'static>, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ZkVerifierContract, ());
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        (env, client, admin)
+    }
+
+    #[test]
+    fn test_pause_and_unpause() {
+        let (_env, client, admin) = setup();
+        assert!(!client.is_paused());
+        client.pause(&admin);
+        assert!(client.is_paused());
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_paused_blocks_verify_proof() {
+        let (env, client, admin) = setup();
+        client.pause(&admin);
+
+        let proof = Bytes::new(&env);
+        let public_inputs = Bytes::new(&env);
+        let result = client.try_verify_proof(&CircuitType::DealValid, &proof, &public_inputs);
+        assert_eq!(result, Err(Ok(VerifierError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_non_admin_cannot_pause() {
+        let (env, client, _admin) = setup();
+        let stranger = Address::generate(&env);
+        let result = client.try_pause(&stranger);
+        assert_eq!(result, Err(Ok(VerifierError::NotAdmin)));
+    }
+
+    #[test]
+    fn test_admin_can_set_vk_while_paused() {
+        let (env, client, admin) = setup();
+        client.pause(&admin);
+        // set_verification_key is admin-only and must work while paused
+        // (VK parsing will fail on empty bytes but should not return ContractPaused)
+        let vk = Bytes::new(&env);
+        let result = client.try_set_verification_key(&admin, &CircuitType::DealValid, &vk);
+        assert!(matches!(result, Err(Ok(VerifierError::VkParseError))));
     }
 }
