@@ -82,9 +82,13 @@ pub fn calculate_side_pots(env: &Env, table: &TableState) -> Result<Vec<SidePot>
     // a folded player committed beyond that cap, so no chips are ever orphaned.
     // Eligibility is still capped at `top_level` (only players who reached the
     // top contender level can win it).
-    let top = build_top_layer(env, table, prev_level, top_level)?;
-    if top.amount > 0 {
-        pots.push_back(top);
+    if top_level <= prev_level {
+        sweep_excess_dead_money_into_last_pot(&mut pots, table, prev_level)?;
+    } else {
+        let top = build_top_layer(env, table, prev_level, top_level)?;
+        if top.amount > 0 {
+            pots.push_back(top);
+        }
     }
 
     Ok(pots)
@@ -210,6 +214,35 @@ fn build_top_layer(
     })
 }
 
+fn sweep_excess_dead_money_into_last_pot(
+    pots: &mut Vec<SidePot>,
+    table: &TableState,
+    lower: i128,
+) -> Result<(), PokerTableError> {
+    if pots.len() == 0 {
+        return Ok(());
+    }
+    let mut excess: i128 = 0;
+    for i in 0..table.players.len() {
+        let p = table
+            .players
+            .get(i)
+            .ok_or(PokerTableError::InvalidPlayerIndex)?;
+        if p.folded && p.committed > lower {
+            excess += p.committed - lower;
+        }
+    }
+    if excess > 0 {
+        let last_index = pots.len() - 1;
+        let mut last = pots
+            .get(last_index)
+            .ok_or(PokerTableError::InvalidPlayerIndex)?;
+        last.amount += excess;
+        pots.set(last_index, last);
+    }
+    Ok(())
+}
+
 /// Distribute every pot to its winner. `winner_seats` lists the seat indices of
 /// the hand's ranked contenders best-first (as proved by the showdown circuit).
 /// For each pot, the chips go to the highest-ranked contender that is eligible
@@ -218,6 +251,7 @@ fn build_top_layer(
 ///
 /// This guarantees the core invariant that a player can only win pots they have
 /// contributed to, and that the total distributed equals the sum of the pots.
+#[cfg(test)]
 pub fn distribute_pots(
     env: &Env,
     table: &mut TableState,
@@ -245,6 +279,84 @@ pub fn distribute_pots(
     }
 
     Ok(payouts)
+}
+
+/// Distribute pots when the best hand is shared by multiple tied seats. For
+/// each pot, every tied winner eligible for that pot receives an equal share;
+/// any odd chip remainder is awarded one chip at a time to the earliest seat.
+/// If none of the tied winners can win a side pot, the fallback ranking is used
+/// to award that side pot to the best eligible non-tied contender.
+pub fn distribute_pots_with_ties(
+    env: &Env,
+    table: &mut TableState,
+    pots: &Vec<SidePot>,
+    tied_winner_seats: &Vec<u32>,
+    fallback_ranking: &Vec<u32>,
+) -> Result<Vec<(u32, i128)>, PokerTableError> {
+    let mut payouts: Vec<(u32, i128)> = Vec::new(env);
+
+    for pi in 0..pots.len() {
+        let pot = pots.get(pi).ok_or(PokerTableError::InvalidPlayerIndex)?;
+        if pot.amount <= 0 {
+            continue;
+        }
+
+        let recipients = eligible_tied_winners(env, tied_winner_seats, &pot.eligible_players);
+        if recipients.is_empty() {
+            let winner_seat = best_eligible_winner(fallback_ranking, &pot.eligible_players)
+                .ok_or(PokerTableError::WinnerNotEligibleForPot)?;
+            credit_player(table, &mut payouts, winner_seat, pot.amount)?;
+            continue;
+        }
+
+        let share = pot.amount / recipients.len() as i128;
+        let mut remainder = pot.amount % recipients.len() as i128;
+        for i in 0..recipients.len() {
+            let seat = recipients
+                .get(i)
+                .ok_or(PokerTableError::InvalidPlayerIndex)?;
+            let odd_chip = if remainder > 0 {
+                remainder -= 1;
+                1
+            } else {
+                0
+            };
+            credit_player(table, &mut payouts, seat, share + odd_chip)?;
+        }
+    }
+
+    Ok(payouts)
+}
+
+fn eligible_tied_winners(env: &Env, tied: &Vec<u32>, eligible: &Vec<u32>) -> Vec<u32> {
+    let mut recipients = Vec::new(env);
+    for ei in 0..eligible.len() {
+        if let Some(seat) = eligible.get(ei) {
+            for ti in 0..tied.len() {
+                if tied.get(ti) == Some(seat) {
+                    recipients.push_back(seat);
+                    break;
+                }
+            }
+        }
+    }
+    recipients
+}
+
+fn credit_player(
+    table: &mut TableState,
+    payouts: &mut Vec<(u32, i128)>,
+    seat: u32,
+    amount: i128,
+) -> Result<(), PokerTableError> {
+    let mut player = table
+        .players
+        .get(seat)
+        .ok_or(PokerTableError::InvalidPlayerIndex)?;
+    player.stack += amount;
+    table.players.set(seat, player);
+    accumulate_payout(payouts, seat, amount);
+    Ok(())
 }
 
 /// Find the best-ranked seat (earliest in `ranked`) that is eligible for a pot.
@@ -309,6 +421,7 @@ mod pot_test {
                 max_buy_in: i128::MAX,
                 small_blind: 0,
                 big_blind: 0,
+                min_players: 2,
                 max_players: 9,
                 timeout_ledgers: 0,
                 committee: admin.clone(),
@@ -583,6 +696,73 @@ mod pot_test {
         assert_eq!(table.players.get(2).unwrap().stack, 250);
         assert_eq!(table.players.get(0).unwrap().stack, 0);
         assert_eq!(table.players.get(1).unwrap().stack, 0);
+    }
+
+    #[test]
+    fn distribute_tied_winners_split_pot_evenly() {
+        let env = Env::default();
+        let players = Vec::from_array(
+            &env,
+            [
+                player(&env, 0, 100, false, false),
+                player(&env, 1, 100, false, false),
+                player(&env, 2, 100, false, false),
+            ],
+        );
+        let mut table = table_with(&env, players);
+        let pots = calculate_side_pots(&env, &table).unwrap();
+        let tied = seats(&env, &[0, 1]);
+        let ranking = seats(&env, &[0, 1, 2]);
+        distribute_pots_with_ties(&env, &mut table, &pots, &tied, &ranking).unwrap();
+
+        assert_eq!(table.players.get(0).unwrap().stack, 150);
+        assert_eq!(table.players.get(1).unwrap().stack, 150);
+        assert_eq!(table.players.get(2).unwrap().stack, 0);
+    }
+
+    #[test]
+    fn distribute_tied_winners_odd_chip_to_earliest_seat() {
+        let env = Env::default();
+        let players = Vec::from_array(
+            &env,
+            [
+                player(&env, 0, 101, false, false),
+                player(&env, 1, 101, false, false),
+                player(&env, 2, 101, false, false),
+            ],
+        );
+        let mut table = table_with(&env, players);
+        let pots = calculate_side_pots(&env, &table).unwrap();
+        let tied = seats(&env, &[1, 2]);
+        let ranking = seats(&env, &[1, 2, 0]);
+        distribute_pots_with_ties(&env, &mut table, &pots, &tied, &ranking).unwrap();
+
+        assert_eq!(table.players.get(0).unwrap().stack, 0);
+        assert_eq!(table.players.get(1).unwrap().stack, 152);
+        assert_eq!(table.players.get(2).unwrap().stack, 151);
+    }
+
+    #[test]
+    fn distribute_tied_winners_board_plays_for_all() {
+        let env = Env::default();
+        let players = Vec::from_array(
+            &env,
+            [
+                player(&env, 0, 25, false, false),
+                player(&env, 1, 25, false, false),
+                player(&env, 2, 25, false, false),
+                player(&env, 3, 25, false, false),
+            ],
+        );
+        let mut table = table_with(&env, players);
+        let pots = calculate_side_pots(&env, &table).unwrap();
+        let tied = seats(&env, &[0, 1, 2, 3]);
+        let ranking = tied.clone();
+        distribute_pots_with_ties(&env, &mut table, &pots, &tied, &ranking).unwrap();
+
+        for seat in 0..4 {
+            assert_eq!(table.players.get(seat).unwrap().stack, 25);
+        }
     }
 
     #[test]

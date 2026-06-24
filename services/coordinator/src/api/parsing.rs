@@ -17,6 +17,7 @@ pub(crate) struct ParsedRevealOutputs {
 pub(crate) struct ParsedShowdownOutputs {
     pub hole_cards: Vec<(u32, u32)>,
     pub winner_index: u32,
+    pub tie_mask: u32,
 }
 
 pub(crate) fn parse_deal_outputs(
@@ -96,7 +97,7 @@ pub(crate) fn parse_showdown_outputs(
     public_inputs: &[String],
     num_players: usize,
 ) -> Result<ParsedShowdownOutputs, String> {
-    let needed = MAX_PLAYERS + MAX_PLAYERS + 1;
+    let needed = MAX_PLAYERS + MAX_PLAYERS + 2;
     if public_inputs.len() < needed {
         return Err(format!(
             "showdown public input vector too short: got {}, need at least {}",
@@ -115,6 +116,7 @@ pub(crate) fn parse_showdown_outputs(
     let hole1 = parse_u32_slice(&public_inputs[start..(start + MAX_PLAYERS)])?;
     let hole2 = parse_u32_slice(&public_inputs[(start + MAX_PLAYERS)..(start + 2 * MAX_PLAYERS)])?;
     let winner_index = parse_single_u32(&public_inputs[start + 2 * MAX_PLAYERS])?;
+    let tie_mask = parse_single_u32(&public_inputs[start + 2 * MAX_PLAYERS + 1])?;
 
     let hole_cards = (0..num_players)
         .map(|i| (hole1[i], hole2[i]))
@@ -123,6 +125,7 @@ pub(crate) fn parse_showdown_outputs(
     Ok(ParsedShowdownOutputs {
         hole_cards,
         winner_index,
+        tie_mask,
     })
 }
 

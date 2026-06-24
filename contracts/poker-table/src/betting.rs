@@ -161,7 +161,7 @@ pub fn reset_round(env: &Env, table: &mut TableState) -> Result<(), PokerTableEr
     // First active player after dealer acts first post-flop
     let num_players = table.players.len() as u32;
     if num_players == 0 {
-        return Err(PokerTableError::NeedAtLeastTwoPlayers);
+        return Err(PokerTableError::NotEnoughPlayers);
     }
     let mut seat = (table.dealer_seat + 1) % num_players;
     for _ in 0..num_players {
@@ -184,7 +184,7 @@ pub fn reset_round(env: &Env, table: &mut TableState) -> Result<(), PokerTableEr
 fn advance_turn(env: &Env, table: &mut TableState) -> Result<(), PokerTableError> {
     let num_players = table.players.len() as u32;
     if num_players == 0 {
-        return Err(PokerTableError::NeedAtLeastTwoPlayers);
+        return Err(PokerTableError::NotEnoughPlayers);
     }
     let mut next = (table.current_turn + 1) % num_players;
 

@@ -686,6 +686,14 @@ pub async fn request_showdown(
         );
         return Err(StatusCode::BAD_GATEWAY);
     }
+    if parsed_showdown.tie_mask & (1u32 << parsed_showdown.winner_index) == 0 {
+        tracing::error!(
+            "Showdown tie mask {} does not include winner index {}",
+            parsed_showdown.tie_mask,
+            parsed_showdown.winner_index
+        );
+        return Err(StatusCode::BAD_GATEWAY);
+    }
     let winner = session.player_order[parsed_showdown.winner_index as usize].clone();
 
     let (tx_hash, settled_by_timeout) = match soroban::submit_showdown_proof(

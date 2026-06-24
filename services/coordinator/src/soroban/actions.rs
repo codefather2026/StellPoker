@@ -47,11 +47,7 @@ async fn maybe_friendbot_top_up(config: &SorobanConfig, address: &str) {
         return;
     };
     let url = format!("{}?addr={}", base, address);
-    match Command::new("curl")
-        .args(["-sfL", &url])
-        .output()
-        .await
-    {
+    match Command::new("curl").args(["-sfL", &url]).output().await {
         Ok(output) if output.status.success() => {
             tracing::info!("friendbot topped up {}", address);
         }
@@ -316,6 +312,8 @@ pub async fn create_seeded_table(
             "max_players".to_string(),
             serde_json::Value::Number(serde_json::Number::from(max_players)),
         );
+        obj.entry("min_players".to_string())
+            .or_insert_with(|| serde_json::Value::Number(serde_json::Number::from(2u32)));
         obj.insert(
             "committee".to_string(),
             serde_json::Value::String(config.committee_address()?),

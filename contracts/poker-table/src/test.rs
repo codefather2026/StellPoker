@@ -64,6 +64,7 @@ mod test {
             max_buy_in: 1000,
             small_blind: 5,
             big_blind: 10,
+            min_players: 2,
             max_players: 6,
             timeout_ledgers: 100,
             committee: committee.clone(),
@@ -131,6 +132,7 @@ mod test {
             max_buy_in: 100_000,
             small_blind: 100,
             big_blind: 200,
+            min_players: 2,
             max_players: 6,
             timeout_ledgers: 100,
             committee: committee.clone(),
@@ -188,6 +190,7 @@ mod test {
         assert_eq!(table.config.max_buy_in, 1000);
         assert_eq!(table.config.small_blind, 5);
         assert_eq!(table.config.big_blind, 10);
+        assert_eq!(table.config.min_players, 2);
         assert_eq!(table.config.max_players, 6);
         assert_eq!(table.phase, GamePhase::Waiting);
         assert_eq!(table.players.len(), 0);
@@ -281,6 +284,25 @@ mod test {
         s.client.join_table(&table_id, &player, &500);
     }
 
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_join_table_above_max_players_rejected() {
+        let s = setup();
+        let config = TableConfig {
+            max_players: 2,
+            ..default_config(&s.env, &s.token.address, &s.committee, &s.verifier)
+        };
+        let table_id = s.client.create_table(&s.admin, &config);
+
+        for _ in 0..2 {
+            let player = Address::generate(&s.env);
+            join_player(&s, table_id, &player, 500);
+        }
+
+        let extra = Address::generate(&s.env);
+        join_player(&s, table_id, &extra, 500);
+    }
+
     // ---------------------------------------------------------------------------
     // 3. Start hand
     // ---------------------------------------------------------------------------
@@ -313,15 +335,67 @@ mod test {
     }
 
     #[test]
+    fn test_start_hand_exactly_min_players_allowed() {
+        let s = setup();
+        let config = TableConfig {
+            min_players: 3,
+            max_players: 3,
+            ..default_config(&s.env, &s.token.address, &s.committee, &s.verifier)
+        };
+        let table_id = s.client.create_table(&s.admin, &config);
+
+        for _ in 0..3 {
+            let player = Address::generate(&s.env);
+            join_player(&s, table_id, &player, 500);
+        }
+
+        s.client.start_hand(&table_id);
+        let table = s.client.get_table(&table_id);
+        assert_eq!(table.phase, GamePhase::Dealing);
+    }
+
+    #[test]
     #[should_panic(expected = "Error(Contract, #9)")]
     fn test_start_hand_not_enough_players() {
+        let s = setup();
+        let config = TableConfig {
+            min_players: 3,
+            max_players: 6,
+            ..default_config(&s.env, &s.token.address, &s.committee, &s.verifier)
+        };
+        let table_id = s.client.create_table(&s.admin, &config);
+
+        let p1 = Address::generate(&s.env);
+        join_player(&s, table_id, &p1, 500);
+        let p2 = Address::generate(&s.env);
+        join_player(&s, table_id, &p2, 500);
+
+        s.client.start_hand(&table_id);
+    }
+
+    #[test]
+    fn test_admin_can_change_min_players_between_hands() {
+        let s = setup();
+        let table_id = create_default_table(&s);
+
+        s.client.set_min_players(&table_id, &3);
+        let table = s.client.get_table(&table_id);
+        assert_eq!(table.config.min_players, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #38)")]
+    fn test_admin_cannot_change_min_players_mid_hand() {
         let s = setup();
         let table_id = create_default_table(&s);
 
         let p1 = Address::generate(&s.env);
+        let p2 = Address::generate(&s.env);
         join_player(&s, table_id, &p1, 500);
-
+        join_player(&s, table_id, &p2, 500);
         s.client.start_hand(&table_id);
+
+        s.client.set_min_players(&table_id, &3);
     }
 
     // ---------------------------------------------------------------------------

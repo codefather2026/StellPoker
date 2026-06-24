@@ -35,6 +35,32 @@ pub struct CommitteeEpoch {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GamePhase {
+    Deal,
+    Reveal,
+    Showdown,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct GameLiveness {
+    pub game_id: u32,
+    pub phase: GamePhase,
+    pub last_progress_ledger: u32,
+    pub affected_players: Vec<Address>,
+    pub resolved: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TimeoutConfig {
+    pub deal_ledgers: u32,
+    pub reveal_ledgers: u32,
+    pub showdown_ledgers: u32,
+}
+
+#[contracttype]
 #[derive(Clone, Debug)]
 pub enum RegistryKey {
     Admin,
@@ -44,6 +70,8 @@ pub enum RegistryKey {
     CurrentEpoch,
     Epoch(u32),
     SlashEvent(u32), // slash event counter
+    TimeoutConfig,
+    Game(u32),
 }
 
 #[contractimpl]
@@ -63,6 +91,107 @@ impl CommitteeRegistryContract {
         env.storage()
             .instance()
             .set(&RegistryKey::MinStake, &min_stake);
+        env.storage().instance().set(
+            &RegistryKey::TimeoutConfig,
+            &TimeoutConfig {
+                deal_ledgers: 120,
+                reveal_ledgers: 120,
+                showdown_ledgers: 120,
+            },
+        );
+    }
+
+    /// Admin configures timeout windows for the phases that depend on MPC nodes.
+    pub fn set_timeout_config(
+        env: Env,
+        admin: Address,
+        deal_ledgers: u32,
+        reveal_ledgers: u32,
+        showdown_ledgers: u32,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        assert!(deal_ledgers > 0, "deal timeout must be positive");
+        assert!(reveal_ledgers > 0, "reveal timeout must be positive");
+        assert!(showdown_ledgers > 0, "showdown timeout must be positive");
+
+        let config = TimeoutConfig {
+            deal_ledgers,
+            reveal_ledgers,
+            showdown_ledgers,
+        };
+        env.storage()
+            .instance()
+            .set(&RegistryKey::TimeoutConfig, &config);
+        env.events().publish(
+            (Symbol::new(&env, "timeout_config_updated"),),
+            (deal_ledgers, reveal_ledgers, showdown_ledgers),
+        );
+    }
+
+    /// Admin records the phase and affected players for a game. Poker-table or
+    /// coordinator integrations call this whenever MPC-dependent progress moves.
+    pub fn track_game_phase(
+        env: Env,
+        admin: Address,
+        game_id: u32,
+        phase: GamePhase,
+        affected_players: Vec<Address>,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        assert!(!affected_players.is_empty(), "no affected players");
+
+        let liveness = GameLiveness {
+            game_id,
+            phase: phase.clone(),
+            last_progress_ledger: env.ledger().sequence(),
+            affected_players: affected_players.clone(),
+            resolved: false,
+        };
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::Game(game_id), &liveness);
+        env.events().publish(
+            (Symbol::new(&env, "game_phase_tracked"), game_id),
+            (phase, affected_players),
+        );
+    }
+
+    /// Report an MPC node that failed to respond within the tracked phase
+    /// timeout. The node is slashed immediately and the slashed amount is split
+    /// among affected players; any odd stroop goes to the earliest listed player.
+    pub fn report_timeout(env: Env, game_id: u32, node_id: Address) -> i128 {
+        let mut game: GameLiveness = env
+            .storage()
+            .persistent()
+            .get(&RegistryKey::Game(game_id))
+            .expect("game not tracked");
+        assert!(!game.resolved, "timeout already resolved");
+
+        let config: TimeoutConfig = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::TimeoutConfig)
+            .expect("not initialized");
+        let timeout = Self::timeout_for_phase(&config, &game.phase);
+        assert!(
+            env.ledger().sequence() >= game.last_progress_ledger + timeout,
+            "timeout not reached"
+        );
+
+        let slashed = Self::slash_member_stake(&env, &node_id, Symbol::new(&env, "timeout"));
+        Self::redistribute_slashed_stake(&env, &game.affected_players, slashed);
+
+        game.resolved = true;
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::Game(game_id), &game);
+        env.events().publish(
+            (Symbol::new(&env, "timeout_reported"), game_id),
+            (node_id, game.phase, slashed),
+        );
+        slashed
     }
 
     /// Register as a committee member with a stake.
@@ -83,7 +212,7 @@ impl CommitteeRegistryContract {
             .get(&RegistryKey::StakeToken)
             .unwrap();
         let token = token::Client::new(&env, &token_addr);
-        token.transfer(&member, &env.current_contract_address(), &stake);
+        token.transfer(&member, env.current_contract_address(), &stake);
 
         let member_state = CommitteeMember {
             address: member.clone(),
@@ -218,31 +347,7 @@ impl CommitteeRegistryContract {
         // In production, verify reporter is an authorized PokerTable contract
         // For v1, any address can report (admin will adjudicate)
 
-        let mut m: CommitteeMember = env
-            .storage()
-            .persistent()
-            .get(&RegistryKey::Member(member.clone()))
-            .expect("not a member");
-
-        m.slash_count += 1;
-
-        // Emit slash event for off-chain monitoring
-        env.events().publish(
-            (Symbol::new(&env, "slash_reported"), m.slash_count),
-            (member.clone(), reason),
-        );
-
-        // If slash count exceeds threshold, deactivate and slash stake
-        if m.slash_count >= 3 {
-            let slashed = m.stake / 2; // Slash 50%
-            m.stake -= slashed;
-            m.active = false;
-            // Slashed funds stay in contract (can be distributed to affected players)
-        }
-
-        env.storage()
-            .persistent()
-            .set(&RegistryKey::Member(member), &m);
+        Self::slash_member_record(&env, &member, reason);
     }
 
     /// View the current epoch.
@@ -268,5 +373,208 @@ impl CommitteeRegistryContract {
             .persistent()
             .get(&RegistryKey::Member(member))
             .expect("not a member")
+    }
+
+    pub fn get_timeout_config(env: Env) -> TimeoutConfig {
+        env.storage()
+            .instance()
+            .get(&RegistryKey::TimeoutConfig)
+            .expect("not initialized")
+    }
+
+    pub fn get_game_liveness(env: Env, game_id: u32) -> GameLiveness {
+        env.storage()
+            .persistent()
+            .get(&RegistryKey::Game(game_id))
+            .expect("game not tracked")
+    }
+
+    fn require_admin(env: &Env, admin: &Address) {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admin)
+            .expect("not initialized");
+        assert!(*admin == stored_admin, "not admin");
+    }
+
+    fn timeout_for_phase(config: &TimeoutConfig, phase: &GamePhase) -> u32 {
+        match phase {
+            GamePhase::Deal => config.deal_ledgers,
+            GamePhase::Reveal => config.reveal_ledgers,
+            GamePhase::Showdown => config.showdown_ledgers,
+        }
+    }
+
+    fn slash_member_stake(env: &Env, member: &Address, reason: Symbol) -> i128 {
+        let mut m: CommitteeMember = env
+            .storage()
+            .persistent()
+            .get(&RegistryKey::Member(member.clone()))
+            .expect("not a member");
+        m.slash_count += 1;
+        let slashed = m.stake / 2;
+        m.stake -= slashed;
+        m.active = false;
+        env.events().publish(
+            (Symbol::new(env, "slash_reported"), m.slash_count),
+            (member.clone(), reason),
+        );
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::Member(member.clone()), &m);
+        slashed
+    }
+
+    fn slash_member_record(env: &Env, member: &Address, reason: Symbol) -> CommitteeMember {
+        let mut m: CommitteeMember = env
+            .storage()
+            .persistent()
+            .get(&RegistryKey::Member(member.clone()))
+            .expect("not a member");
+
+        m.slash_count += 1;
+        env.events().publish(
+            (Symbol::new(env, "slash_reported"), m.slash_count),
+            (member.clone(), reason),
+        );
+
+        if m.slash_count >= 3 {
+            let slashed = m.stake / 2;
+            m.stake -= slashed;
+            m.active = false;
+        }
+
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::Member(member.clone()), &m);
+        m
+    }
+
+    fn redistribute_slashed_stake(env: &Env, players: &Vec<Address>, amount: i128) {
+        if amount <= 0 || players.is_empty() {
+            return;
+        }
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::StakeToken)
+            .unwrap();
+        let token = token::Client::new(env, &token_addr);
+        let share = amount / players.len() as i128;
+        let mut remainder = amount % players.len() as i128;
+        for i in 0..players.len() {
+            let player = players.get(i).unwrap();
+            let odd = if remainder > 0 {
+                remainder -= 1;
+                1
+            } else {
+                0
+            };
+            token.transfer(&env.current_contract_address(), &player, &(share + odd));
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        token::{StellarAssetClient, TokenClient},
+    };
+
+    struct Setup<'a> {
+        env: Env,
+        client: CommitteeRegistryContractClient<'a>,
+        token: TokenClient<'a>,
+        admin: Address,
+        member: Address,
+    }
+
+    fn setup() -> Setup<'static> {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CommitteeRegistryContract, ());
+        let client = CommitteeRegistryContractClient::new(&env, &contract_id);
+
+        let token_admin_addr = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(token_admin_addr);
+        let token = TokenClient::new(&env, &sac.address());
+        let token_admin = StellarAssetClient::new(&env, &sac.address());
+
+        let admin = Address::generate(&env);
+        let member = Address::generate(&env);
+        client.initialize(&admin, &token.address, &1_000);
+        token_admin.mint(&member, &2_000);
+        client.register_member(
+            &member,
+            &1_000,
+            &soroban_sdk::String::from_str(&env, "node-0"),
+        );
+
+        Setup {
+            env,
+            client,
+            token,
+            admin,
+            member,
+        }
+    }
+
+    #[test]
+    fn timeout_config_defaults_and_updates() {
+        let s = setup();
+        let config = s.client.get_timeout_config();
+        assert_eq!(config.deal_ledgers, 120);
+        assert_eq!(config.reveal_ledgers, 120);
+        assert_eq!(config.showdown_ledgers, 120);
+
+        s.client.set_timeout_config(&s.admin, &5, &7, &9);
+        let config = s.client.get_timeout_config();
+        assert_eq!(config.deal_ledgers, 5);
+        assert_eq!(config.reveal_ledgers, 7);
+        assert_eq!(config.showdown_ledgers, 9);
+    }
+
+    #[test]
+    fn report_timeout_slashes_and_redistributes_to_affected_players() {
+        let s = setup();
+        s.client.set_timeout_config(&s.admin, &2, &4, &6);
+        let p1 = Address::generate(&s.env);
+        let p2 = Address::generate(&s.env);
+        let players = Vec::from_array(&s.env, [p1.clone(), p2.clone()]);
+        s.client
+            .track_game_phase(&s.admin, &42, &GamePhase::Deal, &players);
+
+        s.env.ledger().with_mut(|ledger| {
+            ledger.sequence_number += 2;
+        });
+
+        let slashed = s.client.report_timeout(&42, &s.member);
+        assert_eq!(slashed, 500);
+
+        let member = s.client.get_member(&s.member);
+        assert_eq!(member.stake, 500);
+        assert!(!member.active);
+        assert_eq!(member.slash_count, 1);
+        assert_eq!(s.token.balance(&p1), 250);
+        assert_eq!(s.token.balance(&p2), 250);
+
+        let game = s.client.get_game_liveness(&42);
+        assert!(game.resolved);
+    }
+
+    #[test]
+    #[should_panic(expected = "timeout not reached")]
+    fn report_timeout_before_window_reverts() {
+        let s = setup();
+        s.client.set_timeout_config(&s.admin, &10, &10, &10);
+        let player = Address::generate(&s.env);
+        let players = Vec::from_array(&s.env, [player]);
+        s.client
+            .track_game_phase(&s.admin, &7, &GamePhase::Showdown, &players);
+
+        s.client.report_timeout(&7, &s.member);
     }
 }

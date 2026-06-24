@@ -109,6 +109,13 @@ def stellar_player_action(player_identity: str, table_id: int, player_address: s
 
 def get_on_chain_phase():
     """Read on-chain table phase."""
+    state = get_on_chain_table()
+    if isinstance(state, dict):
+        return state.get("phase", "unknown")
+    return state
+
+def get_on_chain_table():
+    """Read full on-chain table state."""
     if not ON_CHAIN:
         return None
     cmd = [
@@ -125,11 +132,23 @@ def get_on_chain_phase():
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     if result.returncode == 0:
         try:
-            state = json.loads(result.stdout)
-            return state.get("phase", "unknown")
+            return json.loads(result.stdout)
         except json.JSONDecodeError:
             return "parse_error"
     return "error"
+
+def player_stack_total(table_state: dict) -> int:
+    total = 0
+    for player in table_state.get("players", []):
+        total += int(player.get("stack", 0))
+    return total
+
+def table_chip_total(table_state: dict) -> int:
+    return (
+        player_stack_total(table_state)
+        + int(table_state.get("pot", 0))
+        + int(table_state.get("rake_balance", 0))
+    )
 
 def ensure_on_chain_ready_for_deal():
     """Ensure on-chain table is in Dealing phase before requesting MPC deal."""
@@ -242,6 +261,10 @@ if ON_CHAIN:
     ensure_on_chain_ready_for_deal()
     phase = get_on_chain_phase()
     print(f"=== On-Chain Table Ready Phase: {phase} ===")
+    initial_table_state = get_on_chain_table()
+    initial_chip_total = table_chip_total(initial_table_state) if isinstance(initial_table_state, dict) else None
+else:
+    initial_chip_total = None
 
 # --- Step 2: Request Deal ---
 print("\n=== Request Deal (table {}, 2 players) ===".format(TABLE_ID))
@@ -362,5 +385,20 @@ if ON_CHAIN:
     if phase != "Settlement":
         print("ERROR: flow finished but on-chain phase is not Settlement")
         exit(1)
+    final_table_state = get_on_chain_table()
+    if not isinstance(final_table_state, dict):
+        print(f"ERROR: could not read final on-chain table state: {final_table_state}")
+        exit(1)
+    if int(final_table_state.get("pot", -1)) != 0:
+        print(f"ERROR: expected settled pot to be 0, got {final_table_state.get('pot')}")
+        exit(1)
+    final_stack_total = player_stack_total(final_table_state)
+    final_chip_total = table_chip_total(final_table_state)
+    if initial_chip_total is not None and final_chip_total != initial_chip_total:
+        print(f"ERROR: table chip total changed from {initial_chip_total} to {final_chip_total}")
+        exit(1)
+    print(f"  Settled pot: {final_table_state.get('pot')}")
+    print(f"  Player stack total: {final_stack_total}")
+    print(f"  Table chip total: {final_chip_total}")
 
 print("\n=== FULL FLOW COMPLETE ===")

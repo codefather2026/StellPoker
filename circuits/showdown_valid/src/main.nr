@@ -1,7 +1,8 @@
 /// Showdown Validity Circuit
 ///
 /// Derives hole cards from shared deck contributions, verifies commitments,
-/// evaluates all active hands, and outputs the winner index.
+/// evaluates all active hands, and outputs the winner index plus a bit mask of
+/// every active player tied for the best score.
 
 use stellar_poker_lib::cards;
 use stellar_poker_lib::commitments;
@@ -24,7 +25,7 @@ fn main(
     hand_commitments: pub [Field; MAX_PLAYERS],
     board_indices: pub [u32; 5],
     deck_root: pub Field,
-) -> pub ([u32; MAX_PLAYERS], [u32; MAX_PLAYERS], u32) {
+) -> pub ([u32; MAX_PLAYERS], [u32; MAX_PLAYERS], u32, u32) {
     assert(num_active_players >= 2, "need at least 2 players");
     assert(num_active_players <= MAX_PLAYERS, "too many active players");
 
@@ -100,7 +101,8 @@ fn main(
         }
     }
 
-    // 4. Compute winner as first seat with maximal score.
+    // 4. Compute winner as first seat with maximal score and mark all tied
+    // seats. The contract uses the mask to split tied pots.
     let mut winner_index: u32 = 0;
     let mut winner_score: u32 = 0;
     for p in 0..MAX_PLAYERS {
@@ -118,5 +120,15 @@ fn main(
         }
     }
 
-    (hole_card1, hole_card2, winner_index)
+    let bit_values: [u32; MAX_PLAYERS] = [1, 2, 4, 8, 16, 32];
+    let mut tie_mask: u32 = 0;
+    for p in 0..MAX_PLAYERS {
+        if p < num_active_players {
+            if hand_scores[p] == winner_score {
+                tie_mask = tie_mask + bit_values[p];
+            }
+        }
+    }
+
+    (hole_card1, hole_card2, winner_index, tie_mask)
 }

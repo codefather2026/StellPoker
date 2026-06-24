@@ -10,8 +10,8 @@ pub fn start_new_hand(env: &Env, table: &mut TableState) -> Result<(), PokerTabl
 
     // Rotate dealer button
     let num_players = table.players.len() as u32;
-    if num_players < 2 {
-        return Err(PokerTableError::NeedAtLeastTwoPlayers);
+    if num_players < table.config.min_players {
+        return Err(PokerTableError::NotEnoughPlayers);
     }
     table.dealer_seat = (table.dealer_seat + 1) % num_players;
 
@@ -105,6 +105,7 @@ pub fn settle_showdown(
     env: &Env,
     table: &mut TableState,
     winner_seat: u32,
+    tie_mask: u32,
 ) -> Result<(), PokerTableError> {
     let total_pot = table.pot;
 
@@ -118,7 +119,8 @@ pub fn settle_showdown(
     table.side_pots = net_pots.clone();
     table.rake_balance += rake;
     let ranking = build_winner_ranking(env, table, winner_seat)?;
-    let payouts = pot::distribute_pots(env, table, &net_pots, &ranking)?;
+    let tied_winners = build_tied_winners(env, table, winner_seat, tie_mask)?;
+    let payouts = pot::distribute_pots_with_ties(env, table, &net_pots, &tied_winners, &ranking)?;
 
     table.pot = 0;
     table.phase = GamePhase::Settlement;
@@ -143,6 +145,33 @@ pub fn settle_showdown(
         );
     }
     Ok(())
+}
+
+fn build_tied_winners(
+    env: &Env,
+    table: &TableState,
+    winner_seat: u32,
+    tie_mask: u32,
+) -> Result<Vec<u32>, PokerTableError> {
+    let mut winners: Vec<u32> = Vec::new(env);
+    for i in 0..table.players.len() {
+        let p = table
+            .players
+            .get(i)
+            .ok_or(PokerTableError::InvalidPlayerIndex)?;
+        if p.folded {
+            continue;
+        }
+        let seat = p.seat_index;
+        let tied = seat == winner_seat || (tie_mask & (1u32 << seat)) != 0;
+        if tied {
+            winners.push_back(seat);
+        }
+    }
+    if winners.is_empty() {
+        return Err(PokerTableError::WinnerNotEligibleForPot);
+    }
+    Ok(winners)
 }
 
 /// Build a best-first ranking of contenders for pot distribution. The ZK

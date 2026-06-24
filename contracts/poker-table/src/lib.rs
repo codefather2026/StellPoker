@@ -20,6 +20,7 @@ use types::*;
 const TABLE_TTL_THRESHOLD: u32 = 17_280; // ~1 day — trigger extension when below this
 const TABLE_TTL_EXTEND: u32 = 518_400; // ~30 days
 const BOARD_INDICES_COUNT: u32 = 5; // flop(3) + turn(1) + river(1)
+const MAX_PLAYERS_PER_TABLE: u32 = 6;
 
 #[contract]
 pub struct PokerTableContract;
@@ -121,6 +122,12 @@ impl PokerTableContract {
 
         if config.rake_bps > pot::MAX_RAKE_BPS {
             return Err(PokerTableError::RakeBpsExceedsMax);
+        }
+        if config.min_players < 2
+            || config.max_players < config.min_players
+            || config.max_players > MAX_PLAYERS_PER_TABLE
+        {
+            return Err(PokerTableError::InvalidPlayerCount);
         }
 
         let table_id = env
@@ -273,8 +280,8 @@ impl PokerTableContract {
         if !matches!(table.phase, GamePhase::Waiting | GamePhase::Settlement) {
             return Err(PokerTableError::HandAlreadyInProgress);
         }
-        if table.players.len() < 2 {
-            return Err(PokerTableError::NeedAtLeastTwoPlayers);
+        if table.players.len() < table.config.min_players {
+            return Err(PokerTableError::NotEnoughPlayers);
         }
 
         game::start_new_hand(&env, &mut table)?;
@@ -351,7 +358,7 @@ impl PokerTableContract {
         // Set first player to act (left of big blind).
         let num_players = table.players.len() as u32;
         if num_players < 2 {
-            return Err(PokerTableError::NeedAtLeastTwoPlayers);
+            return Err(PokerTableError::NotEnoughPlayers);
         }
         table.current_turn = (table.dealer_seat + 3) % num_players;
 
@@ -516,6 +523,7 @@ impl PokerTableContract {
         // The circuit proved this winner; we use it for payout instead of
         // re-evaluating hands on-chain.
         let winner_index = extract_u32_from_public_inputs(&public_inputs, 25);
+        let tie_mask = extract_u32_from_public_inputs(&public_inputs, 26);
 
         // Verify that the committee-submitted hole_cards match the proof outputs.
         // Hole cards from the proof are seat-indexed (field 13..19 for hole_card1,
@@ -523,8 +531,9 @@ impl PokerTableContract {
         // order (seat order, skipping folded).
         verify_hole_cards_against_proof(&env, &table, &public_inputs, &hole_cards)?;
 
-        // Settle using the winner_index from the proof (not re-evaluating).
-        game::settle_showdown(&env, &mut table, winner_index)?;
+        // Settle using the proved winner and optional tie mask from the proof
+        // (not re-evaluating hands on-chain).
+        game::settle_showdown(&env, &mut table, winner_index, tie_mask)?;
 
         save_table(&env, &table);
         Ok(())
@@ -596,6 +605,31 @@ impl PokerTableContract {
 
         env.events()
             .publish((Symbol::new(&env, "rake_bps_updated"), table_id), rake_bps);
+        Ok(())
+    }
+
+    /// Update the minimum seated players required to start a hand. This can
+    /// only be changed between hands and must stay within the table capacity.
+    pub fn set_min_players(
+        env: Env,
+        table_id: u32,
+        min_players: u32,
+    ) -> Result<(), PokerTableError> {
+        let mut table = load_table(&env, table_id)?;
+        table.admin.require_auth();
+        if !matches!(table.phase, GamePhase::Waiting | GamePhase::Settlement) {
+            return Err(PokerTableError::CannotChangeMinPlayersMidHand);
+        }
+        if min_players < 2 || min_players > table.config.max_players {
+            return Err(PokerTableError::InvalidPlayerCount);
+        }
+        table.config.min_players = min_players;
+        save_table(&env, &table);
+
+        env.events().publish(
+            (Symbol::new(&env, "min_players_updated"), table_id),
+            min_players,
+        );
         Ok(())
     }
 

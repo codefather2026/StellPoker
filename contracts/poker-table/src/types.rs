@@ -8,7 +8,10 @@ pub struct TableConfig {
     pub max_buy_in: i128,
     pub small_blind: i128,
     pub big_blind: i128,
-    pub max_players: u32,     // 2-9
+    /// Minimum seated players required to start a hand.
+    pub min_players: u32,
+    /// Maximum seated players allowed at the table. Capped at 6.
+    pub max_players: u32,
     pub timeout_ledgers: u32, // Ledgers before timeout (~5 sec each)
     pub committee: Address,   // MPC committee address
     pub verifier: Address,    // ZK verifier contract address
@@ -30,7 +33,7 @@ pub enum PokerTableError {
     PlayerNotAtTable = 6,
     CannotLeaveDuringActiveHand = 7,
     HandAlreadyInProgress = 8,
-    NeedAtLeastTwoPlayers = 9,
+    NotEnoughPlayers = 9,
     InvalidPlayerIndex = 10,
     NotYourTurn = 11,
     PlayerAlreadyFolded = 12,
@@ -58,6 +61,8 @@ pub enum PokerTableError {
     HoleCardMismatch = 34,
     WinnerNotEligibleForPot = 35,
     RakeBpsExceedsMax = 36,
+    InvalidPlayerCount = 37,
+    CannotChangeMinPlayersMidHand = 38,
 }
 
 #[contracttype]

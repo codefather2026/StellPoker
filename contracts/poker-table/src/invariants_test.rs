@@ -18,10 +18,13 @@
 
 #![cfg(test)]
 
+extern crate std;
+
 use crate::pot::{calculate_side_pots, distribute_pots};
 use crate::types::*;
 use proptest::prelude::*;
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Vec};
+use std::format;
 
 /// A generated player: total committed chips, whether all-in, whether folded.
 #[derive(Clone, Debug)]
@@ -85,6 +88,7 @@ fn build_table(env: &Env, gen: &[GenPlayer]) -> (TableState, i128) {
             max_buy_in: i128::MAX,
             small_blind: 0,
             big_blind: 0,
+            min_players: 2,
             max_players: 9,
             timeout_ledgers: 0,
             committee: admin.clone(),

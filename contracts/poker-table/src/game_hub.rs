@@ -5,6 +5,7 @@ use soroban_sdk::{contractclient, Address, Env};
 /// CB4VZAT2U3UC6XFK3N23SKRF2NDCMP3QHJYMCHHFMZO7MRQO6DQ2EMYG.
 /// For tests, use the mock in contracts/game-hub/.
 #[contractclient(name = "GameHubClient")]
+#[allow(dead_code)]
 pub trait GameHub {
     fn start_game(
         env: Env,

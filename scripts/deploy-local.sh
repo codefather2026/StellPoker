@@ -30,7 +30,9 @@ echo ""
 
 # 1. Start Stellar standalone container if not already running
 echo "Starting Stellar standalone network (Docker)..."
-if ! docker ps --format '{{.Names}}' | grep -q stellar; then
+if curl -sf -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' "$RPC_URL" >/dev/null 2>&1; then
+    echo "  Stellar RPC already running."
+elif ! docker ps --format '{{.Names}}' | grep -q stellar; then
     stellar container start -t future --name local --limits unlimited 2>/dev/null || {
         echo "ERROR: Failed to start Stellar container. Is Docker running?"
         exit 1
@@ -203,7 +205,7 @@ TABLE_ID=$(stellar contract invoke \
     --network "$NETWORK" \
     -- create_table \
     --admin "$COMMITTEE_ADDRESS" \
-    --config "{\"token\":\"$TOKEN_CONTRACT\",\"min_buy_in\":\"1000000000\",\"max_buy_in\":\"100000000000\",\"small_blind\":\"500000000\",\"big_blind\":\"1000000000\",\"max_players\":$MAX_PLAYERS,\"timeout_ledgers\":100,\"committee\":\"$COMMITTEE_ADDRESS\",\"verifier\":\"$ZK_VERIFIER\",\"game_hub\":\"$GAME_HUB\",\"rake_bps\":0}")
+    --config "{\"token\":\"$TOKEN_CONTRACT\",\"min_buy_in\":\"1000000000\",\"max_buy_in\":\"100000000000\",\"small_blind\":\"500000000\",\"big_blind\":\"1000000000\",\"min_players\":2,\"max_players\":$MAX_PLAYERS,\"timeout_ledgers\":100,\"committee\":\"$COMMITTEE_ADDRESS\",\"verifier\":\"$ZK_VERIFIER\",\"game_hub\":\"$GAME_HUB\",\"rake_bps\":0}")
 echo "  Table ID: $TABLE_ID"
 
 # 10. Mint/wrap XLM for players and have them join

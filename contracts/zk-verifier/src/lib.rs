@@ -23,7 +23,7 @@ use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
 ///   [19..22) revealed_cards[0..3]
 ///   [22..25) revealed_indices[0..3]
 ///
-/// ShowdownValid  (26 fields = 832 bytes):
+/// ShowdownValid  (27 fields = 864 bytes):
 ///   [0]  num_active_players
 ///   [1..7)  hand_commitments[0..6]
 ///   [7..12) board_indices[0..5]
@@ -31,8 +31,9 @@ use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
 ///   [13..19) hole_card1[0..6]
 ///   [19..25) hole_card2[0..6]
 ///   [25] winner_index
+///   [26] tie_mask
 
-const SHOWDOWN_FIELD_COUNT: u32 = 26;
+const SHOWDOWN_FIELD_COUNT: u32 = 27;
 const SHOWDOWN_BYTES: u32 = SHOWDOWN_FIELD_COUNT * 32;
 
 const DEAL_FIELD_COUNT: u32 = 20;
@@ -187,11 +188,7 @@ impl ZkVerifierContract {
 
     /// Check that a 32-byte field element in `public_inputs` at `field_index`
     /// matches an `expected` BytesN<32>.
-    fn check_bytes32_field(
-        public_inputs: &Bytes,
-        field_index: u32,
-        expected: &BytesN<32>,
-    ) -> bool {
+    fn check_bytes32_field(public_inputs: &Bytes, field_index: u32, expected: &BytesN<32>) -> bool {
         let start = field_index * 32;
         let expected_arr = expected.to_array();
         for i in 0..32u32 {
@@ -319,7 +316,7 @@ impl ZkVerifierContract {
 
     // ====================================================================
     // Showdown proof — validate hand_commitments, board_indices, deck_root,
-    // and return the proved winner_index
+    // and return the proved winner_index / tie_mask outputs
     // ====================================================================
 
     /// Verify a showdown proof and validate that all game-state parameters
@@ -331,6 +328,7 @@ impl ZkVerifierContract {
     ///   [7..12) board_indices[0..5]
     ///   [12] deck_root
     ///   [25] winner_index
+    ///   [26] tie_mask
     pub fn verify_showdown(
         env: Env,
         proof: Bytes,
