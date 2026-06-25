@@ -3,6 +3,7 @@
 mod auth;
 mod parsing;
 mod session;
+pub mod flags;
 pub mod types;
 
 pub use types::*;
@@ -15,7 +16,7 @@ use axum::{
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::{mpc, session_gc, soroban, AppState, TableSession};
+use crate::{feature_flags, mpc, session_gc, soroban, AppState, TableSession};
 use auth::{allow_insecure_dev_auth, enforce_rate_limit, validate_signed_request};
 use parsing::{
     parse_deal_outputs, parse_requested_buy_in, parse_reveal_outputs, parse_showdown_outputs,
@@ -81,6 +82,15 @@ pub async fn create_table(
     let auth = validate_signed_request(&state, &headers, 0, "create_table", None).await?;
 
     let solo_mode = req.solo.unwrap_or(false);
+    if solo_mode
+        && !state
+            .feature_flags
+            .is_enabled(feature_flags::keys::SOLO_MODE, &feature_flags::FlagScope::Global)
+            .await
+    {
+        tracing::warn!("create_table: solo_mode requested but feature flag is disabled");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let max_players = if solo_mode {
         2
     } else {

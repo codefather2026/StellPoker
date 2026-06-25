@@ -38,6 +38,7 @@ mod api;
 mod db;
 #[path = "middleware.rs"]
 mod request_log;
+mod feature_flags;
 mod mpc;
 mod session_gc;
 mod soroban;
@@ -98,8 +99,7 @@ struct AppState {
     chat_channels: Arc<Mutex<HashMap<u32, tokio::sync::broadcast::Sender<String>>>>,
     mpc_sessions: session_gc::SessionStore,
     stats: stats::StatsStore,
-    // Present when DATABASE_URL is set; None falls back to in-memory only.
-    db_pool: Option<sqlx::PgPool>,
+    feature_flags: feature_flags::FeatureFlagStore,
 }
 
 #[derive(Clone)]
@@ -237,25 +237,8 @@ async fn main() {
         tracing::info!("Stats indexer started (poll={}s)", poll_secs);
     }
 
-    let db_pool = match std::env::var("DATABASE_URL") {
-        Ok(url) => match db::connect(&url).await {
-            Ok(pool) => {
-                match db::run_migrations(&pool).await {
-                    Ok(()) => tracing::info!("Database migrations applied"),
-                    Err(e) => tracing::warn!("Migration error: {}", e),
-                }
-                Some(pool)
-            }
-            Err(e) => {
-                tracing::warn!("Database connection failed, running in-memory only: {}", e);
-                None
-            }
-        },
-        Err(_) => {
-            tracing::info!("DATABASE_URL not set — running without persistent storage");
-            None
-        }
-    };
+    let feature_flag_store = feature_flags::FeatureFlagStore::from_env();
+    tracing::info!("Feature flags initialised");
 
     let state = AppState {
         tables: Arc::new(RwLock::new(HashMap::new())),
@@ -268,7 +251,7 @@ async fn main() {
         chat_channels: Arc::new(Mutex::new(HashMap::new())),
         mpc_sessions,
         stats: stats_store,
-        db_pool,
+        feature_flags: feature_flag_store,
     };
 
     // Spawn background node health check task
@@ -304,6 +287,8 @@ async fn main() {
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/stats", get(get_stats))
+        .route("/api/flags", get(api::flags::list_flags))
+        .route("/api/flags/:key", post(api::flags::set_flag))
         .route("/api/tables/create", post(api::create_table))
         .route("/api/tables/open", get(api::list_open_tables))
         .route("/api/chain-config", get(api::get_chain_config))
