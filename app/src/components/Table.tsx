@@ -22,6 +22,7 @@ import { usePokerActions } from "@/lib/use-poker-actions";
 import { getDealerLine } from "@/lib/dealer-lines";
 import { subscribePokerTableEvents } from "@/lib/events";
 import { getAlias, setAlias } from "@/lib/alias-store";
+import { stellarExpertUrl } from "@/lib/explorer";
 import {
   loadHandHistory,
   saveHandHistoryEntry,
@@ -740,9 +741,9 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
 
             {(() => {
               const explorerUrl = game.lastTxHash
-                ? `https://stellar.expert/explorer/testnet/tx/${game.lastTxHash}`
+                ? stellarExpertUrl("tx", game.lastTxHash)
                 : wallet
-                  ? `https://stellar.expert/explorer/testnet/account/${wallet.address}`
+                  ? stellarExpertUrl("account", wallet.address)
                   : null;
               if (!explorerUrl) return null;
               return (
@@ -1005,7 +1006,7 @@ export function Table({ tableId, initialPlayMode }: TableProps) {
               <span className="text-[8px]" style={{ color: "#7f8c8d" }}>
                 TX:{" "}
                 <a
-                  href={`https://stellar.expert/explorer/testnet/tx/${game.lastTxHash}`}
+                  href={stellarExpertUrl("tx", game.lastTxHash)}
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{ color: "#ffc078", textShadow: "1px 1px 0 rgba(0,0,0,0.5)" }}
